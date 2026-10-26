@@ -24,6 +24,9 @@ type System interface {
 
 	Stage(ctx context.Context, job string, a api.StageArgs, fetch Fetcher) (api.StageResult, error)
 	BootOnce(entry string) error
+	// Install installs a Release's packages as its installer does, fetching
+	// them from labd by sha256.
+	Install(ctx context.Context, job string, a api.InstallArgs, fetch Fetcher) error
 	RunTest(ctx context.Context, job string, t api.TestSpec, fetch Fetcher, outDir string) api.TestResult
 	Collect(ctx context.Context, boot, outDir string) error
 	// PreviousBoot is the ID of the boot before this one, if the journal saw

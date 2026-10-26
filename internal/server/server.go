@@ -984,6 +984,9 @@ func (s *Server) submit(maintainer string, spec api.JobSpec) (*api.Job, int, err
 		}
 	}
 	for _, t := range spec.Tests {
+		if t.Identity != nil {
+			return nil, 400, fmt.Errorf("test %s: identity checks are the lab's own, part of an Installed run", t.Name)
+		}
 		if t.Script != "" {
 			if _, err := os.Stat(s.artifactPath(t.Script)); err != nil {
 				return nil, 400, fmt.Errorf("test %s: script artifact %s not uploaded", t.Name, t.Script)
