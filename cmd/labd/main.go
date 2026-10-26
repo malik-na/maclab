@@ -19,11 +19,15 @@ import (
 
 func main() {
 	home, _ := os.UserHomeDir()
-	listen := flag.String("listen", ":7770", "address to serve the API on (agents must reach it)")
+	listen := flag.String("listen", envOr("MACLAB_LISTEN", "127.0.0.1:7770"), "address to serve the API on: labd's tailnet IP and port, e.g. 100.64.0.1:7770 (agents must reach it; the default is this machine only)")
 	data := flag.String("data", filepath.Join(home, ".local/share/maclab"), "data directory")
 	ntfy := flag.String("ntfy", os.Getenv("MACLAB_NTFY"), "ntfy topic URL for notifications, e.g. https://ntfy.sh/<secret-topic>")
 	notifyCmd := flag.String("notify-cmd", os.Getenv("MACLAB_NOTIFY_CMD"), `shell command run per notification with $MACLAB_TITLE/$MACLAB_BODY, e.g. 'notify-send "$MACLAB_TITLE" "$MACLAB_BODY"'`)
-	bootTimeout := flag.Duration("boot-timeout", 4*time.Minute, "default time a Mac gets to come back after a reboot")
+	bootTimeout := flag.Duration("boot-timeout", 6*time.Minute, "default time a Mac gets to come back after a reboot")
+	offlineAfter := flag.Duration("offline-after", 3*time.Minute, "how long an idle Mac may be silent before labd marks it offline")
+	aliveWindow := flag.Duration("alive-window", time.Minute, "how stale a heartbeat may be before a Mac counts unresponsive")
+	quietGrace := flag.Duration("quiet-grace", 3*time.Minute, "how long a Mac may go silent on the same boot before a command on it counts lost")
+	stageTimeout := flag.Duration("stage-timeout", 45*time.Minute, "time a Mac gets to stage a kernel, download included")
 	artifactGB := flag.Int64("artifact-budget-gb", 20, "cap on the kernel artifact store; unreferenced artifacts go first")
 	maintainer := flag.String("maintainer", os.Getenv("USER"), "the first Maintainer's name, used once: on a fresh labd, or on the first start after upgrading from the single admin token")
 	omt := flag.Bool("omt", true, "run omarchy-m-test (github.com/maralcbr/omarchy-m-testing) in every job on Macs with a desktop user, and compare it with the known-good kernel")
@@ -55,7 +59,7 @@ func main() {
 	defer stop()
 	s, err := server.New(ctx, server.Config{DataDir: *data, FirstMaintainer: *maintainer, FirstMaintainerToken: tok,
 		OMT: *omt, OMTSite: *omtSite, OMTPublish: *omtPublish, OMTEvery: *omtEvery,
-		BootTimeout: *bootTimeout, NtfyURL: *ntfy, NotifyCmd: *notifyCmd,
+		BootTimeout: *bootTimeout, OfflineAfter: *offlineAfter, AliveWindow: *aliveWindow, QuietGrace: *quietGrace, StageTimeout: *stageTimeout, NtfyURL: *ntfy, NotifyCmd: *notifyCmd,
 		BuilderToken: strings.TrimSpace(string(btok)), ArtifactBudget: *artifactGB << 30}, nil)
 	if err != nil {
 		log.Fatal(err)
@@ -71,6 +75,13 @@ func main() {
 	if err := hs.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
+}
+
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }
 
 func randHex() string {

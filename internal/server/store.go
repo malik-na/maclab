@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS configs (device TEXT NOT NULL, kernel TEXT NOT NULL, 
 func (s *store) saveDevice(d *api.Device, secretHash string) error {
 	b, _ := json.Marshal(d)
 	_, err := s.db.Exec(`INSERT INTO devices(id,name,secret_hash,data) VALUES(?,?,?,?)
-ON CONFLICT(id) DO UPDATE SET name=excluded.name, data=excluded.data`, d.ID, d.Name, secretHash, string(b))
+ON CONFLICT(id) DO UPDATE SET name=excluded.name, secret_hash=excluded.secret_hash, data=excluded.data`, d.ID, d.Name, secretHash, string(b))
 	return err
 }
 
@@ -71,11 +71,11 @@ func (s *store) addToken(hash string, req api.EnrollTokenRequest, exp time.Time)
 	return err
 }
 
-// takeToken consumes a one-time enrollment token.
-func (s *store) takeToken(hash string, now time.Time) (*api.EnrollTokenRequest, error) {
+// token looks up an enrollment token that has not expired.
+func (s *store) token(hash string, now time.Time) (*api.EnrollTokenRequest, error) {
 	var r api.EnrollTokenRequest
 	var exp int64
-	err := s.db.QueryRow(`DELETE FROM tokens WHERE token_hash=? RETURNING name,label,model,expires`, hash).Scan(&r.Name, &r.Label, &r.Model, &exp)
+	err := s.db.QueryRow(`SELECT name,label,model,expires FROM tokens WHERE token_hash=?`, hash).Scan(&r.Name, &r.Label, &r.Model, &exp)
 	if err != nil {
 		return nil, err
 	}
@@ -83,6 +83,12 @@ func (s *store) takeToken(hash string, now time.Time) (*api.EnrollTokenRequest, 
 		return nil, sql.ErrNoRows
 	}
 	return &r, nil
+}
+
+// spendTokens uses up the enrollment tokens for a name: its Mac has checked in.
+func (s *store) spendTokens(name string) error {
+	_, err := s.db.Exec(`DELETE FROM tokens WHERE name=?`, name)
+	return err
 }
 
 func (s *store) saveJob(j *api.Job) error {
