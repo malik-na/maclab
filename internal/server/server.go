@@ -131,6 +131,14 @@ func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
 	if cfg.StageTimeout == 0 {
 		cfg.StageTimeout = 20 * time.Minute
 	}
+	// The LAN defaults are read once, here: labd's goroutines can outlive a
+	// Server, and must not read them while a test sets them for the next one.
+	if cfg.AliveWindow == 0 {
+		cfg.AliveWindow = aliveWindow
+	}
+	if cfg.QuietGrace == 0 {
+		cfg.QuietGrace = quietGrace
+	}
 	if cfg.OOBFactory == nil {
 		cfg.OOBFactory = func(d *api.Device) (oob.Controller, error) { return oob.New(d.OOB) }
 	}
