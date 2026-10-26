@@ -201,6 +201,36 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 		outcome, summary = r.ir.seal(outcome, summary, at)
 	}
 	r.finishAt(outcome, summary, at)
+	if outcome == api.OutcomeIncomplete {
+		r.retry()
+	}
+}
+
+// windowCut is the outcome of a job the Mac's Availability window closing
+// (its end, or the Volunteer's Pause) cut short, what: incomplete, not failed.
+// lab-agent stopped it by itself.
+func windowCut(what string) (string, string) {
+	return api.OutcomeIncomplete, "the Mac's Availability window closed " + what
+}
+
+// retry queues an incomplete job again as a new job; like any job on a
+// Volunteer's Mac, it waits for a window it fits in. labd's own omarchy-m-test
+// refreshes aren't retried: the next one is due anyway.
+func (r *jobRun) retry() {
+	if r.j.Spec.Holder == omtHolder {
+		return
+	}
+	spec := r.j.Spec
+	if spec.Source != "" && spec.Kernel != "" {
+		// the kernel is built: the retry boots it again
+		spec.Source, spec.Config = "", ""
+	}
+	j, _, err := r.s.submit(r.j.Maintainer, spec)
+	if err != nil {
+		r.ev("not retried: %v", err)
+		return
+	}
+	r.ev("retried in a later window as job %s", j.ID)
 }
 
 func (r *jobRun) finish(outcome, summary string) { r.finishAt(outcome, summary, r.s.now()) }
@@ -211,7 +241,7 @@ func (r *jobRun) finishAt(outcome, summary string, at time.Time) {
 		j.Events = append(j.Events, api.JobEvent{Time: at, Msg: "done: " + outcome + ": " + summary})
 	})
 	r.s.log.Printf("job %s done: %s: %s", r.j.ID, outcome, summary)
-	if outcome != api.OutcomePass && outcome != api.OutcomeCanceled {
+	if outcome != api.OutcomePass && outcome != api.OutcomeCanceled && outcome != api.OutcomeIncomplete {
 		r.s.notify(Notification{Device: r.j.Spec.Device, Title: fmt.Sprintf("job %s on %s: %s", r.j.ID, r.j.Spec.Device, outcome), Body: summary, Priority: "low"})
 	}
 }
@@ -254,7 +284,12 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 		args = api.StageArgs{Serial: d.OOB != nil, Installed: r.ir.stageArgs()}
 	}
 	args.WatchdogOpenTimeoutSec = int(r.s.cfg.WatchdogOpenTimeout / time.Second)
-	if err := v.call(ctx, api.CmdStage, j.ID, args, r.s.cfg.StageTimeout, &sr); err != nil {
+	if err := v.call(ctx, api.CmdStage, j.ID, args, r.s.cfg.StageTimeout, &sr); errors.Is(err, errWindowClosed) {
+		return windowCut("while staging (" + err.Error() + ")")
+	} else if errors.Is(err, errDeviceLost) && v.windowClosed() {
+		// Out of reach as its window closed: lab-agent stops staging by itself.
+		return windowCut("while staging, with the Mac out of reach")
+	} else if err != nil {
 		return api.OutcomeStageFailed, "staging failed: " + err.Error()
 	}
 	v.mu.Lock()
@@ -274,7 +309,10 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 	t0 := r.s.now()
 	r.armedBoot, r.armedAt = oldBoot, t0
 	arm := api.BootOnceArgs{Entry: sr.Entry, BootTimeoutSec: int(r.boot / time.Second), JobSec: int(r.labBootJob() / time.Second)}
-	if err := v.call(ctx, api.CmdBootOnce, j.ID, arm, 2*time.Minute, nil); err != nil {
+	if err := v.call(ctx, api.CmdBootOnce, j.ID, arm, 2*time.Minute, nil); errors.Is(err, errWindowClosed) {
+		r.armedBoot = "" // nothing was armed: there is no reboot for restore to wait for
+		return windowCut("before the Lab boot (" + err.Error() + ")")
+	} else if err != nil {
 		return api.OutcomeInfra, "arming the one-shot boot failed: " + err.Error()
 	}
 	r.ev("one-shot armed, rebooting into %s", sr.Entry)
@@ -293,7 +331,9 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 		o, cause := r.classify(t0, steps)
 		r.s.updateJob(j, func(j *api.Job) { j.Result.FellBack = true })
 		r.ev("came back on %s instead of the test entry: %s", d.Kernel, cause)
-		if lost := r.collectLost(ctx); lost.Deadline != "" {
+		if lost := r.collectLost(ctx); lost.Deadline == api.DeadlineWindowClosed {
+			return windowCut("during the Lab boot of " + sr.KernelRelease + ", which went back to " + d.Kernel + " before it reached labd")
+		} else if lost.Deadline != "" {
 			return api.OutcomeLostContact, fmt.Sprintf("%s booted but never reached labd; its %s deadline rebooted the Mac to %s",
 				sr.KernelRelease, lost.Deadline, d.Kernel)
 		}
@@ -326,6 +366,9 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 		err := v.callNote(ctx, api.CmdRunTest, j.ID, t, testTimeout(t), &tr, func(n string) { r.ev("%s", n) })
 		if errors.Is(err, errDeviceLost) {
 			return r.lostDuringTest(ctx, t.Name)
+		}
+		if errors.Is(err, errWindowClosed) {
+			return windowCut("before test " + t.Name + " (" + err.Error() + ")")
 		}
 		if err != nil {
 			tr = api.TestResult{Name: t.Name, ExitCode: -1, Error: err.Error()}
@@ -599,7 +642,11 @@ func (r *jobRun) lostDuringTest(ctx context.Context, test string) (string, strin
 	})
 	if err == nil && ok {
 		r.ev("back after %.0fs", r.s.since(lost).Seconds())
-		if lostBoot := r.collectLost(ctx); lostBoot.Deadline != "" {
+		switch lostBoot := r.collectLost(ctx); lostBoot.Deadline {
+		case "":
+		case api.DeadlineWindowClosed:
+			return windowCut("during test " + test + ": lab-agent rebooted the Mac to " + r.v.snapshot().Kernel)
+		default:
 			o, cause = api.OutcomeLostContact, fmt.Sprintf("labd lost the Lab boot and its %s deadline rebooted it", lostBoot.Deadline)
 		}
 	}

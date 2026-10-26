@@ -98,7 +98,7 @@ type Agent struct {
 	repMu             sync.Mutex // one report in flight at a time
 	mu                sync.Mutex
 	seen              map[string]bool
-	running           map[string]bool
+	running           map[string]runningCmd
 	results           []api.CommandResult
 	events            []api.KernelEvent
 	factsRevision     uint64
@@ -107,6 +107,7 @@ type Agent struct {
 	after             []func() // actions to run once pending results reach labd
 	contacted         string   // the Lab boot whose contact with labd is on record
 	kind              string   // the Mac's kind, as labd's check-ins say
+	awake             awakeHold
 	wake              chan struct{}
 	life              context.Context // commands outlive the poll that delivered them
 }
@@ -121,7 +122,7 @@ func New(cfg *Config, sys System, logger *log.Logger) *Agent {
 		http:    &http.Client{Timeout: cfg.httpTimeout()},
 		log:     logger,
 		seen:    map[string]bool{},
-		running: map[string]bool{},
+		running: map[string]runningCmd{},
 		wake:    make(chan struct{}, 1),
 	}
 }
@@ -153,6 +154,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	})
 	go a.sys.WatchSleep(ctx, a.sleeping)
 	go a.reportLoop(ctx)
+	go a.watchWindow(ctx)
 	var pollMu sync.Mutex
 	var pollCancel context.CancelFunc
 	if s, ok := a.sys.(*Sim); ok {
@@ -164,7 +166,7 @@ func (a *Agent) Run(ctx context.Context) error {
 			pollMu.Unlock()
 		}
 		s.setEarlyUnit(func(ctx context.Context) {
-			if err := enforceLabBootDeadlines(ctx, a.clock(), a.labBootDir(), s, a.log.Printf); err != nil {
+			if err := enforceLabBootDeadlines(ctx, a.clock(), a.workDir(), s, a.log.Printf); err != nil {
 				a.log.Printf("Lab boot deadlines: %v", err)
 			}
 		})
@@ -273,6 +275,7 @@ func (a *Agent) poll(ctx context.Context) error {
 		return err
 	}
 	a.reachedLabd(bootID, cmdline)
+	a.keepAwake()
 	a.mu.Lock()
 	a.kind = resp.Kind
 	if ci.Facts != nil {
@@ -334,6 +337,13 @@ func (a *Agent) report(ctx context.Context) error {
 	return nil
 }
 
+// runningCmd is a command lab-agent is executing.
+type runningCmd struct {
+	c      api.Command
+	stop   context.CancelCauseFunc
+	bootID string // the boot it runs on
+}
+
 func (a *Agent) start(ctx context.Context, c api.Command) {
 	a.mu.Lock()
 	if a.seen[c.ID] {
@@ -341,12 +351,20 @@ func (a *Agent) start(ctx context.Context, c api.Command) {
 		return
 	}
 	a.seen[c.ID] = true
-	a.running[c.ID] = true
+	ctx, stop := context.WithCancelCause(ctx)
+	bootID, _, _ := a.sys.Identity()
+	a.running[c.ID] = runningCmd{c: c, stop: stop, bootID: bootID}
 	a.mu.Unlock()
+	a.keepAwake()
 	a.log.Printf("command %s %s job=%s", c.ID, c.Kind, c.JobID)
 	go func() {
+		defer stop(nil)
 		out, after, err := a.exec(ctx, c)
-		r := api.CommandResult{ID: c.ID, OK: err == nil}
+		if cause := context.Cause(ctx); err != nil && errors.Is(cause, errStoppedAtWindowClose) {
+			err = cause // whatever the command made of being stopped
+		}
+		r := api.CommandResult{ID: c.ID, OK: err == nil,
+			WindowClosed: errors.Is(err, errRefusedOutsideWindow) || errors.Is(err, errStoppedAtWindowClose)}
 		if err != nil {
 			r.Error = err.Error()
 			a.log.Printf("command %s failed: %v", c.ID, err)
@@ -354,13 +372,19 @@ func (a *Agent) start(ctx context.Context, c api.Command) {
 		if out != nil {
 			r.Output, _ = json.Marshal(out)
 		}
+		// A command whose boot ended died with it, as it does on a real Mac:
+		// labd already counts it lost.
+		now, _, _ := a.sys.Identity()
 		a.mu.Lock()
 		delete(a.running, c.ID)
-		a.results = append(a.results, r)
-		if after != nil && err == nil {
-			a.after = append(a.after, after)
+		if now == bootID {
+			a.results = append(a.results, r)
+			if after != nil && err == nil {
+				a.after = append(a.after, after)
+			}
 		}
 		a.mu.Unlock()
+		a.keepAwake()
 		a.poke()
 	}()
 }
@@ -541,6 +565,7 @@ func (a *Agent) armLabBoot(args api.BootOnceArgs) error {
 	// window's end if that comes first.
 	jobEnd := a.capAtWindowEnd(now.Add(time.Duration(args.JobSec) * time.Second))
 	d := newLabBootDeadlines(now, time.Duration(args.BootTimeoutSec)*time.Second, jobEnd)
+	d.WindowGated = a.volunteer()
 	dir := a.labBootDir()
 	for _, f := range []string{labBootContactFile, labBootSeenFile} {
 		if err := os.Remove(filepath.Join(dir, f)); err != nil && !os.IsNotExist(err) {
