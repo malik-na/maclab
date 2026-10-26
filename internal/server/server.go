@@ -47,8 +47,11 @@ type Config struct {
 	AliveWindow  time.Duration // how stale a heartbeat may be before a Mac counts unresponsive
 	QuietGrace   time.Duration // silence on the same boot before a command counts lost
 	StageTimeout time.Duration // time a Mac gets to stage a kernel, artifact download included
-	NtfyURL      string
-	NotifyCmd    string
+	// WatchdogOpenTimeout is watchdog.open_timeout on every Lab boot's command
+	// line; 0 is lab-agent's default (150 s).
+	WatchdogOpenTimeout time.Duration
+	NtfyURL             string
+	NotifyCmd           string
 	// OOBFactory builds a controller for a device; tests swap in fakes.
 	OOBFactory func(*api.Device) (oob.Controller, error)
 	// BuilderToken authenticates builder hosts; empty disables builds.

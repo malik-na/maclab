@@ -26,6 +26,12 @@ type System interface {
 	BootOnce(entry string) error
 	RunTest(ctx context.Context, job string, t api.TestSpec, fetch Fetcher, outDir string) api.TestResult
 	Collect(ctx context.Context, boot, outDir string) error
+	// PreviousBoot is the ID of the boot before this one, if the journal saw
+	// it start after since; "" if not.
+	PreviousBoot(since time.Time) string
+	// CollectPstore copies the pstore/ramoops records of crashes since since
+	// into outDir and returns their names.
+	CollectPstore(since time.Time, outDir string) ([]string, error)
 	Cleanup(job string, all bool) error
 	// Screenshot captures the GUI session as JPEG to path.
 	Screenshot(ctx context.Context, path string, wait time.Duration) (w, h int, err error)

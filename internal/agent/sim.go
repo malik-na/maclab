@@ -23,7 +23,8 @@ import (
 // "krel=7.1-test behavior=panic"; behaviors are ok, omt-regress (boots, but
 // Wi-Fi fails in omarchy-m-test), panic (at boot),
 // hang (at boot), silent (hang with no serial output), crash-in-test and
-// no-network (boots to the login prompt, then never reaches labd).
+// no-network (boots to the login prompt, then never reaches labd). A field
+// apple_wdt=n says the kernel was built without apple_wdt.
 // A test named suspend-* puts it to sleep for SuspendFor, announcing it the way
 // logind does; one named quiet-suspend-* sleeps without announcing it.
 type Sim struct {
@@ -37,8 +38,10 @@ type Sim struct {
 	mu           sync.Mutex
 	sleepFn      func(bool)
 	bootID       string
+	prevBootID   string
 	kernel       string
 	cmdline      string
+	noAppleWDT   bool // the running kernel was built without apple_wdt
 	alive        bool
 	armed        string
 	staged       map[string]simEntry
@@ -79,6 +82,11 @@ type Sim struct {
 	unlock   func() // the boot waiting at the disk password prompt
 	snapshot *simDisk
 	notices  []string
+
+	// earlyUnit runs from the start of each boot's userspace until the boot
+	// ends, as lab-agent's early systemd unit does; the agent sets it.
+	earlyUnit func(ctx context.Context)
+	endBoot   context.CancelFunc
 }
 
 // simDisk is what a snapper snapshot holds of the simulated @ (packages and
@@ -89,7 +97,10 @@ type simDisk struct {
 	staged                                  map[string]simEntry
 }
 
-type simEntry struct{ krel, behavior, cmdline string }
+type simEntry struct {
+	krel, behavior, cmdline string
+	noAppleWDT              bool
+}
 
 // InstalledObs, when set, answers installed-mode identity tests: it returns
 // the collector's observation for a phase on the given running boot.
@@ -179,10 +190,11 @@ func (s *Sim) Stage(ctx context.Context, job string, a api.StageArgs, fetch Fetc
 		if in.Path == "" || in.UKISHA256 == "" || in.Cmdline == "" {
 			return api.StageResult{}, fmt.Errorf("installed stage needs path, uki_sha256 and cmdline")
 		}
+		cmdline := withLabBootParams(in.Cmdline, a.WatchdogOpenTimeout())
 		s.mu.Lock()
-		s.staged[job] = simEntry{krel: in.Release, behavior: "ok", cmdline: in.Cmdline}
+		s.staged[job] = simEntry{krel: in.Release, behavior: "ok", cmdline: cmdline}
 		s.mu.Unlock()
-		return api.StageResult{KernelRelease: in.Release, Entry: entryPrefix + job, Cmdline: in.Cmdline}, nil
+		return api.StageResult{KernelRelease: in.Release, Entry: entryPrefix + job, Cmdline: cmdline}, nil
 	}
 	e := simEntry{krel: SimKnownGood, behavior: "ok"}
 	if a.Artifact != "" {
@@ -198,6 +210,7 @@ func (s *Sim) Stage(ctx context.Context, job string, a api.StageArgs, fetch Fetc
 			if v, ok := strings.CutPrefix(f, "behavior="); ok {
 				e.behavior = v
 			}
+			e.noAppleWDT = e.noAppleWDT || f == "apple_wdt=n"
 		}
 		if e.krel == SimKnownGood {
 			return api.StageResult{}, fmt.Errorf("artifact kernel release %s is the running kernel", e.krel)
@@ -211,7 +224,7 @@ func (s *Sim) Stage(ctx context.Context, job string, a api.StageArgs, fetch Fetc
 	s.mu.Lock()
 	s.staged[job] = e
 	s.mu.Unlock()
-	return api.StageResult{KernelRelease: e.krel, Entry: entryPrefix + job, Cmdline: e.cmdline}, nil
+	return api.StageResult{KernelRelease: e.krel, Entry: entryPrefix + job, Cmdline: e.cmdline, NoAppleWDT: e.noAppleWDT}, nil
 }
 
 func (s *Sim) BootOnce(entry string) error {
@@ -240,6 +253,10 @@ func (s *Sim) boot(last string) {
 	s.gen++
 	gen := s.gen
 	down := s.OnBoot
+	if s.endBoot != nil {
+		s.endBoot()
+		s.endBoot = nil
+	}
 	s.mu.Unlock()
 	if down != nil {
 		down()
@@ -262,7 +279,7 @@ func (s *Sim) boot(last string) {
 			e = s.staged[strings.TrimPrefix(s.armed, entryPrefix)]
 			s.armed = "" // GRUB clears the one-shot before booting
 		}
-		s.bootID = newID()
+		s.prevBootID, s.bootID = s.bootID, newID()
 		s.Boots++
 		s.mu.Unlock()
 		s.say("m1n1: booting")
@@ -301,8 +318,13 @@ func (s *Sim) up(gen int, e simEntry) {
 		s.mu.Unlock()
 		return
 	}
-	s.kernel, s.cmdline, s.behavior = e.krel, e.cmdline, e.behavior
+	s.kernel, s.cmdline, s.behavior, s.noAppleWDT = e.krel, e.cmdline, e.behavior, e.noAppleWDT
 	s.alive = e.behavior != "no-network" // up, but labd never hears from it
+	if unit := s.earlyUnit; unit != nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		s.endBoot = cancel
+		go unit(ctx)
+	}
 	s.mu.Unlock()
 	s.say("Run /init as init process")
 	s.say("sim login: ")
@@ -512,9 +534,30 @@ func (s *Sim) Cleanup(job string, all bool) error {
 }
 
 func (s *Sim) KernelConfig() (string, error) {
-	_, k, _ := s.Identity()
-	return "# sim config for " + k + "\nCONFIG_ARM64=y\nCONFIG_LOCALVERSION=\"\"\n", nil
+	s.mu.Lock()
+	k, wdt := s.kernel, "CONFIG_APPLE_WATCHDOG=y\n"
+	if s.noAppleWDT {
+		wdt = "# CONFIG_APPLE_WATCHDOG is not set\n"
+	}
+	s.mu.Unlock()
+	return "# sim config for " + k + "\nCONFIG_ARM64=y\nCONFIG_LOCALVERSION=\"\"\n" + wdt, nil
 }
+
+// setEarlyUnit sets what runs at the start of each boot's userspace.
+func (s *Sim) setEarlyUnit(f func(ctx context.Context)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.earlyUnit = f
+}
+
+// PreviousBoot is the boot before this one: the Sim's journal keeps every boot.
+func (s *Sim) PreviousBoot(since time.Time) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.prevBootID
+}
+
+func (s *Sim) CollectPstore(since time.Time, outDir string) ([]string, error) { return nil, nil }
 
 func (s *Sim) Exec(ctx context.Context, a api.ExecArgs) api.ExecResult {
 	if s.OnExec != nil {
