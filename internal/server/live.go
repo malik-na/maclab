@@ -89,7 +89,7 @@ func (s *Server) hStream(w http.ResponseWriter, r *http.Request) {
 	defer s.hub.unsubscribe(sb)
 	fmt.Fprint(w, ": maclab stream\n\n")
 	fl.Flush()
-	keep := time.NewTicker(15 * time.Second)
+	keep := s.clock().NewTicker(15 * time.Second)
 	defer keep.Stop()
 	for {
 		select {
@@ -97,7 +97,7 @@ func (s *Server) hStream(w http.ResponseWriter, r *http.Request) {
 			return
 		case <-s.ctx.Done():
 			return
-		case <-keep.C:
+		case <-keep.C():
 			fmt.Fprint(w, ": keepalive\n\n")
 		case e := <-sb.ch:
 			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", e.kind, e.data)
@@ -109,7 +109,7 @@ func (s *Server) hStream(w http.ResponseWriter, r *http.Request) {
 // viewLocked is view for callers already holding v.mu.
 func (v *dev) viewLocked() DeviceView {
 	d := v.d
-	if d.Lease != nil && time.Now().After(d.Lease.Expires) {
+	if d.Lease != nil && v.s.now().After(d.Lease.Expires) {
 		d.Lease = nil
 	}
 	return DeviceView{Device: d, Tier: d.Tier(), Alive: v.aliveLocked(), Queued: len(v.queue), ScreenAt: v.screenAt}
@@ -168,7 +168,7 @@ func (s *Server) hAgentScreen(w http.ResponseWriter, r *http.Request) {
 	v := agentDev(r)
 	dir := s.screenDir(v.d.Name)
 	os.MkdirAll(dir, 0o755)
-	now := time.Now()
+	now := s.now()
 	name := fmt.Sprintf("%d.jpg", now.UnixMilli())
 	f, err := os.Create(filepath.Join(dir, name))
 	if err != nil {
@@ -199,7 +199,7 @@ func (s *Server) hScreenshot(w http.ResponseWriter, r *http.Request) {
 	v.shotMu.Lock()
 	defer v.shotMu.Unlock()
 	v.mu.Lock()
-	fresh := time.Since(v.screenAt) < 1500*time.Millisecond
+	fresh := s.since(v.screenAt) < 1500*time.Millisecond
 	alive := v.aliveLocked()
 	v.mu.Unlock()
 	var res api.ScreenResult
@@ -367,7 +367,7 @@ func (s *Server) hConsoleArm(w http.ResponseWriter, r *http.Request) {
 	}
 	// Switching the port into serial mode glitches the line, and the Mac's
 	// shell reads the glitch as a stray 0xFF. Ctrl-U discards it.
-	time.Sleep(200 * time.Millisecond)
+	s.clock().Sleep(200 * time.Millisecond)
 	ctl.Write(r.Context(), []byte{0x15})
 	w.Write([]byte("armed\n"))
 }

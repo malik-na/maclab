@@ -33,6 +33,8 @@ type Config struct {
 	Secret   string `json:"secret"`
 	GUIUser  string `json:"gui_user,omitempty"`
 	WorkDir  string `json:"work_dir,omitempty"`
+	// Clock is where lab-agent reads time; nil is the wall clock.
+	Clock Clock `json:"-"`
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -90,6 +92,13 @@ func New(cfg *Config, sys System, logger *log.Logger) *Agent {
 	}
 }
 
+func (a *Agent) clock() Clock {
+	if a.cfg.Clock == nil {
+		return WallClock
+	}
+	return a.cfg.Clock
+}
+
 // Enroll trades a one-time token for a device identity.
 func Enroll(ctx context.Context, server, token string, facts api.Facts) (*api.EnrollResponse, error) {
 	var resp api.EnrollResponse
@@ -107,7 +116,7 @@ func (a *Agent) Run(ctx context.Context) error {
 			bootID, _, _ := a.sys.Identity()
 			a.mu.Lock()
 			if len(a.events) < 500 {
-				a.events = append(a.events, api.KernelEvent{Time: time.Now(), Kind: k, Source: "kmsg", BootID: bootID, Line: line})
+				a.events = append(a.events, api.KernelEvent{Time: a.clock().Now(), Kind: k, Source: "kmsg", BootID: bootID, Line: line})
 			}
 			a.mu.Unlock()
 			a.poke()
@@ -128,7 +137,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 	for ctx.Err() == nil {
 		if !a.sys.Alive() {
-			sleepCtx(ctx, 100*time.Millisecond)
+			sleepCtx(ctx, a.clock(), 100*time.Millisecond)
 			continue
 		}
 		pctx, cancel := context.WithCancel(ctx)
@@ -142,7 +151,7 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 		if err != nil && ctx.Err() == nil {
 			a.log.Printf("checkin: %v", err)
-			sleepCtx(ctx, 5*time.Second)
+			sleepCtx(ctx, a.clock(), 5*time.Second)
 		}
 	}
 	return ctx.Err()
@@ -152,7 +161,7 @@ func (a *Agent) Run(ctx context.Context) error {
 // it has resumed. Anything still running (a test that suspends) carries on.
 func (a *Agent) sleeping(asleep bool) {
 	bootID, _, _ := a.sys.Identity()
-	e := api.KernelEvent{Time: time.Now(), Kind: detect.Wake, Source: "logind", BootID: bootID, Line: "resumed from sleep"}
+	e := api.KernelEvent{Time: a.clock().Now(), Kind: detect.Wake, Source: "logind", BootID: bootID, Line: "resumed from sleep"}
 	if asleep {
 		e.Kind, e.Line = detect.Sleep, "going to sleep"
 	}
@@ -171,10 +180,10 @@ func (a *Agent) sleeping(asleep bool) {
 	}
 }
 
-func sleepCtx(ctx context.Context, d time.Duration) {
+func sleepCtx(ctx context.Context, c Clock, d time.Duration) {
 	select {
 	case <-ctx.Done():
-	case <-time.After(d):
+	case <-c.After(d):
 	}
 }
 
@@ -190,7 +199,7 @@ func (a *Agent) poll(ctx context.Context) error {
 	ci := api.Checkin{BootID: bootID, Kernel: kernel, Cmdline: cmdline, Health: a.sys.Health()}
 	a.mu.Lock()
 	factsRevision := a.factsRevision
-	refreshFacts := a.lastFacts.IsZero() || a.sentFactsRevision != factsRevision || time.Since(a.lastFacts) >= time.Minute
+	refreshFacts := a.lastFacts.IsZero() || a.sentFactsRevision != factsRevision || a.clock().Now().Sub(a.lastFacts) >= time.Minute
 	for id := range a.running {
 		ci.Running = append(ci.Running, id)
 	}
@@ -210,7 +219,7 @@ func (a *Agent) poll(ctx context.Context) error {
 		// Cleanup can finish while this request is in flight. Acknowledge
 		// only the revision sent, so that refresh is not lost.
 		a.sentFactsRevision = factsRevision
-		a.lastFacts = time.Now()
+		a.lastFacts = a.clock().Now()
 	}
 	a.mu.Unlock()
 	for _, c := range resp.Commands {
@@ -220,14 +229,14 @@ func (a *Agent) poll(ctx context.Context) error {
 }
 
 func (a *Agent) reportLoop(ctx context.Context) {
-	retry := time.NewTicker(3 * time.Second)
+	retry := a.clock().NewTicker(3 * time.Second)
 	defer retry.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-a.wake:
-		case <-retry.C:
+		case <-retry.C():
 		}
 		if a.sys.Alive() {
 			if err := a.report(ctx); err != nil && ctx.Err() == nil {
@@ -412,7 +421,7 @@ func (a *Agent) screenshot(ctx context.Context, c api.Command, args api.ScreenAr
 	if err != nil {
 		return nil, nil, err
 	}
-	res := api.ScreenResult{Time: time.Now(), Width: w, Height: h}
+	res := api.ScreenResult{Time: a.clock().Now(), Width: w, Height: h}
 	if c.JobID != "" {
 		label := args.Label
 		if label == "" {
@@ -532,7 +541,7 @@ func (a *Agent) upload(ctx context.Context, job, name, path string) error {
 		select {
 		case <-ctx.Done():
 			return err
-		case <-time.After(wait):
+		case <-a.clock().After(wait):
 		}
 		wait = min(wait*2, 30*time.Second)
 	}

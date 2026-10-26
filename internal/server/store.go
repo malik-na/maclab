@@ -71,14 +71,14 @@ func (s *store) addToken(hash string, req api.EnrollTokenRequest, exp time.Time)
 }
 
 // takeToken consumes a one-time enrollment token.
-func (s *store) takeToken(hash string) (*api.EnrollTokenRequest, error) {
+func (s *store) takeToken(hash string, now time.Time) (*api.EnrollTokenRequest, error) {
 	var r api.EnrollTokenRequest
 	var exp int64
 	err := s.db.QueryRow(`DELETE FROM tokens WHERE token_hash=? RETURNING name,label,model,expires`, hash).Scan(&r.Name, &r.Label, &r.Model, &exp)
 	if err != nil {
 		return nil, err
 	}
-	if time.Now().Unix() > exp {
+	if now.Unix() > exp {
 		return nil, sql.ErrNoRows
 	}
 	return &r, nil

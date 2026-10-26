@@ -36,7 +36,7 @@ type jobRun struct {
 func (r *jobRun) ev(format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
 	r.s.log.Printf("job %s (%s): %s", r.j.ID, r.j.Spec.Device, msg)
-	r.s.updateJob(r.j, func(j *api.Job) { j.Events = append(j.Events, api.JobEvent{Time: time.Now(), Msg: msg}) })
+	r.s.updateJob(r.j, func(j *api.Job) { j.Events = append(j.Events, api.JobEvent{Time: r.s.now(), Msg: msg}) })
 }
 
 func (r *jobRun) state(st api.JobState) {
@@ -45,7 +45,7 @@ func (r *jobRun) state(st api.JobState) {
 
 // deviceLoop runs one device's jobs in order and tidies up after incidents.
 func (s *Server) deviceLoop(v *dev) {
-	tick := time.NewTicker(10 * time.Second)
+	tick := s.clock().NewTicker(10 * time.Second)
 	defer tick.Stop()
 	for {
 		select {
@@ -65,7 +65,7 @@ func (s *Server) deviceLoop(v *dev) {
 			s.mu.Lock()
 			delete(s.cancels, id)
 			s.mu.Unlock()
-		case <-tick.C:
+		case <-tick.C():
 			v.mu.Lock()
 			need := v.dirty && v.aliveLocked() && (v.d.State == api.StateReady || v.d.State == api.StateNew)
 			v.mu.Unlock()
@@ -113,7 +113,7 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 	v.d.ActiveJob = j.ID
 	v.setStateLocked(api.StateBusy, "job "+j.ID)
 	v.mu.Unlock()
-	r.started = time.Now()
+	r.started = s.now()
 	r.serial0 = s.serialOffset(v.d.Name)
 	defer func() {
 		s.copySerial(v.d.Name, r.serial0, j.ID)
@@ -150,7 +150,7 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 	}
 
 	// Always put the Mac back on its known-good kernel, even after a cancel.
-	rctx, cancel := context.WithTimeout(s.ctx, 3*r.boot+5*time.Minute)
+	rctx, cancel := s.withTimeout(s.ctx, 3*r.boot+5*time.Minute)
 	defer cancel()
 	if v.snapshot().State != api.StateNeedsHands {
 		if err := r.restore(rctx); err != nil {
@@ -173,7 +173,7 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 	if r.omtRef != nil {
 		r.promoteOMT(outcome)
 	}
-	at := time.Now()
+	at := s.now()
 	if r.ir != nil {
 		// the evidence copy carries the final record, and can still fail the job
 		outcome, summary = r.ir.seal(outcome, summary, at)
@@ -181,7 +181,7 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 	r.finishAt(outcome, summary, at)
 }
 
-func (r *jobRun) finish(outcome, summary string) { r.finishAt(outcome, summary, time.Now()) }
+func (r *jobRun) finish(outcome, summary string) { r.finishAt(outcome, summary, r.s.now()) }
 
 func (r *jobRun) finishAt(outcome, summary string, at time.Time) {
 	r.s.updateJob(r.j, func(j *api.Job) {
@@ -244,7 +244,7 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 
 	r.state(api.JobBooting)
 	oldBoot := v.snapshot().BootID
-	t0 := time.Now()
+	t0 := r.s.now()
 	r.armedBoot, r.armedAt = oldBoot, t0
 	if err := v.call(ctx, api.CmdBootOnce, j.ID, api.BootOnceArgs{Entry: sr.Entry}, 2*time.Minute, nil); err != nil {
 		return api.OutcomeInfra, "arming the one-shot boot failed: " + err.Error()
@@ -274,8 +274,8 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 		}
 		return o, cause
 	}
-	r.bootID, r.bootedAt = d.BootID, time.Now()
-	secs := time.Since(t0).Seconds()
+	r.bootID, r.bootedAt = d.BootID, r.s.now()
+	secs := r.s.since(t0).Seconds()
 	r.s.updateJob(j, func(j *api.Job) {
 		j.Result.Booted, j.Result.BootKernel, j.Result.BootSeconds, j.Result.BootCmdline = true, d.Kernel, secs, d.Cmdline
 	})
@@ -491,7 +491,7 @@ func (r *jobRun) classify(t0 time.Time, steps []string) (string, string) {
 
 func (r *jobRun) lostDuringTest(ctx context.Context, test string) (string, string) {
 	r.ev("lost the Mac during test %s; waiting for it to come back", test)
-	lost := time.Now()
+	lost := r.s.now()
 	// A hang has already had quietGrace of silence to show itself.
 	steps, ok, err := r.v.waitBack(ctx, r.bootID, r.bootedAt, max(r.boot-quietGrace, time.Minute))
 	r.addRecovery(steps)
@@ -503,7 +503,7 @@ func (r *jobRun) lostDuringTest(ctx context.Context, test string) (string, strin
 		j.Result.Tests = append(j.Result.Tests, api.TestResult{Name: test, ExitCode: -1, Error: "the kernel went down during this test"})
 	})
 	if err == nil && ok {
-		r.ev("back after %.0fs", time.Since(lost).Seconds())
+		r.ev("back after %.0fs", r.s.since(lost).Seconds())
 		r.collect(ctx, "-1")
 	}
 	return o, fmt.Sprintf("during test %s: %s", test, cause)
@@ -512,7 +512,7 @@ func (r *jobRun) lostDuringTest(ctx context.Context, test string) (string, strin
 func (r *jobRun) crashTest(ctx context.Context) (string, string) {
 	r.state(api.JobTesting)
 	old := r.bootID
-	t0 := time.Now()
+	t0 := r.s.now()
 	r.ev("triggering a deliberate kernel %s", r.j.Spec.Crash)
 	r.v.send(api.CmdCrash, r.j.ID, api.CrashArgs{Mode: r.j.Spec.Crash})
 	r.v.rearmSerial(3 * time.Minute)
@@ -526,7 +526,7 @@ func (r *jobRun) crashTest(ctx context.Context) (string, string) {
 	}
 	r.collect(ctx, "-1")
 	d := r.v.snapshot()
-	took := time.Since(t0).Seconds()
+	took := r.s.since(t0).Seconds()
 	if len(steps) == 0 {
 		return api.OutcomePass, fmt.Sprintf("recovered by itself in %.0fs (panic reboot + one-shot fallback to %s)", took, d.Kernel)
 	}
@@ -571,7 +571,7 @@ func (r *jobRun) restore(ctx context.Context) error {
 	d := v.snapshot()
 	if d.Health.JobTag != "" {
 		r.ev("rebooting back to the known-good kernel")
-		t0 := time.Now()
+		t0 := r.s.now()
 		v.send(api.CmdReboot, r.j.ID, nil)
 		v.rearmSerial(3 * time.Minute)
 		steps, ok, err := v.waitBack(ctx, d.BootID, t0, r.boot)
@@ -628,7 +628,7 @@ func (r *jobRun) build(ctx context.Context) (string, string) {
 		r.s.builds.mu.Lock()
 		builders := 0
 		for _, t := range r.s.builds.builders {
-			if time.Since(t) < time.Minute {
+			if r.s.since(t) < time.Minute {
 				builders++
 			}
 		}

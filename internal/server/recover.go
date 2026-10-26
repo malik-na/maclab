@@ -25,7 +25,7 @@ func (v *dev) waitBack(ctx context.Context, oldBoot string, since time.Time, tim
 		if v.d.BootID != oldBoot && v.d.LastSeen.After(since) {
 			return true
 		}
-		now := time.Now()
+		now := v.s.now()
 		for _, e := range v.events {
 			if e.Time.After(since) && e.Kind == detect.Panic && now.Sub(e.Time) > panicGrace {
 				reason = "kernel panicked and did not reboot within " + panicGrace.String()
@@ -85,7 +85,7 @@ func (v *dev) ladder(ctx context.Context, reason string, bootTimeout time.Durati
 
 	if alive {
 		steps = append(steps, "soft reboot via agent")
-		t0 := time.Now()
+		t0 := v.s.now()
 		v.send(api.CmdReboot, "", nil)
 		v.rearmSerial(3 * time.Minute)
 		if v.waitFor(ctx, bootTimeout, backSince(t0)) == nil {
@@ -98,7 +98,7 @@ func (v *dev) ladder(ctx context.Context, reason string, bootTimeout time.Durati
 			if ctx.Err() != nil {
 				return steps, false
 			}
-			t0 := time.Now()
+			t0 := v.s.now()
 			steps = append(steps, fmt.Sprintf("hard reset %d via %s", i, ctl.Name()))
 			rctx, cancel := context.WithTimeout(ctx, time.Minute)
 			err := ctl.Reset(rctx)
@@ -117,7 +117,7 @@ func (v *dev) ladder(ctx context.Context, reason string, bootTimeout time.Durati
 		return steps, false
 	}
 	v.mu.Lock()
-	act := humanAction(v.d, reason, v.lastLogLocked())
+	act := humanAction(v.d, reason, v.lastLogLocked(), v.s.now())
 	v.d.Action = act
 	v.restore = ""
 	v.setStateLocked(api.StateNeedsHands, reason)
@@ -142,12 +142,12 @@ func (v *dev) lastLogLocked() string {
 
 // humanAction writes the instruction for the person at the desk: which
 // machine, exactly what to press, and that nothing else is needed.
-func humanAction(d api.Device, reason, lastLog string) *api.HumanAction {
+func humanAction(d api.Device, reason, lastLog string, now time.Time) *api.HumanAction {
 	where := d.Name
 	if d.Label != "" {
 		where = fmt.Sprintf("%s (%s)", d.Name, d.Label)
 	}
-	a := &api.HumanAction{Title: d.Name + " needs a power cycle", LastLog: lastLog, Since: time.Now()}
+	a := &api.HumanAction{Title: d.Name + " needs a power cycle", LastLog: lastLog, Since: now}
 	switch d.Model {
 	case api.ModelDesktop:
 		a.Steps = []string{

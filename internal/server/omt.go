@@ -183,7 +183,7 @@ func (r *jobRun) omtResult(tr *api.TestResult) {
 		switch {
 		case j.Spec.Baseline:
 			// lab baseline is how a person sets the references on purpose
-			r.omtRef, _ = json.MarshalIndent(omtBaseline{Job: j.ID, Time: time.Now(), Kernel: res.Kernel, Tool: res.Tool, Status: status}, "", "  ")
+			r.omtRef, _ = json.MarshalIndent(omtBaseline{Job: j.ID, Time: r.s.now(), Kernel: res.Kernel, Tool: res.Tool, Status: status}, "", "  ")
 			res.Reference = "a baseline: becomes the reference if it passes"
 		case len(res.Regressions) > 0:
 			res.Reference = fmt.Sprintf("kept %s: %d checks passed there and fail here", base.Job, len(res.Regressions))
@@ -192,7 +192,7 @@ func (r *jobRun) omtResult(tr *api.TestResult) {
 		case j.Spec.Cmdline != "" || len(j.Spec.CmdlineStrip) > 0 || (j.Spec.CmdlineBase != "" && j.Spec.CmdlineBase != "known-good"):
 			res.Reference = "not a reference: the job changed the known-good cmdline"
 		default:
-			r.omtRef, _ = json.MarshalIndent(omtBaseline{Job: j.ID, Time: time.Now(), Kernel: res.Kernel, Tool: res.Tool, Status: status}, "", "  ")
+			r.omtRef, _ = json.MarshalIndent(omtBaseline{Job: j.ID, Time: r.s.now(), Kernel: res.Kernel, Tool: res.Tool, Status: status}, "", "  ")
 			res.Reference = "becomes the reference if the job passes"
 		}
 		r.s.updateJob(j, func(j *api.Job) { j.Result.OMT = res })
@@ -341,23 +341,23 @@ func (s *Server) omtScheduler() {
 	if s.cfg.OMTEvery <= 0 {
 		return
 	}
-	t := time.NewTicker(10 * time.Minute)
+	t := s.clock().NewTicker(10 * time.Minute)
 	defer t.Stop()
 	for {
 		select {
 		case <-s.ctx.Done():
 			return
-		case <-t.C:
+		case <-t.C():
 		}
 		for _, v := range s.allDevs() {
 			d := v.snapshot()
 			if d.State != api.StateReady || d.ActiveJob != "" || !s.omtWanted(d, api.JobSpec{}) {
 				continue
 			}
-			if l := d.Lease; l != nil && time.Now().Before(l.Expires) {
+			if l := d.Lease; l != nil && s.now().Before(l.Expires) {
 				continue
 			}
-			if base := s.omtBaseline(d.Name); base != nil && time.Since(base.Time) < s.cfg.OMTEvery {
+			if base := s.omtBaseline(d.Name); base != nil && s.since(base.Time) < s.cfg.OMTEvery {
 				continue
 			}
 			if open, _ := s.store.jobs(d.Name, 1, true); len(open) > 0 {

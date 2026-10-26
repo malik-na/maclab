@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/iconidentify/maclab/internal/agent"
 	"github.com/iconidentify/maclab/internal/api"
 	"github.com/iconidentify/maclab/internal/oob"
 	"github.com/iconidentify/maclab/internal/web"
@@ -55,6 +56,8 @@ type Config struct {
 	OMTPublish bool
 	// OMTEvery re-runs omarchy-m-test on each idle Mac's known-good kernel this often; 0 never.
 	OMTEvery time.Duration
+	// Clock is where labd reads time; nil is the wall clock.
+	Clock agent.Clock
 }
 
 type Server struct {
@@ -71,6 +74,34 @@ type Server struct {
 	builds      *buildMgr
 	notifyHooks []func(Notification)
 	serialMu    sync.Mutex
+}
+
+// clock is where labd reads time: Config.Clock, or the wall clock when unset.
+func (s *Server) clock() agent.Clock {
+	if s.cfg.Clock == nil {
+		return agent.WallClock
+	}
+	return s.cfg.Clock
+}
+
+func (s *Server) now() time.Time                  { return s.clock().Now() }
+func (s *Server) since(t time.Time) time.Duration { return s.clock().Now().Sub(t) }
+
+// withTimeout is context.WithTimeout on labd's clock.
+func (s *Server) withTimeout(parent context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+	c := s.clock()
+	if c == agent.WallClock {
+		return context.WithTimeout(parent, d)
+	}
+	ctx, cancel := context.WithCancel(parent)
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-c.After(d):
+			cancel()
+		}
+	}()
+	return ctx, cancel
 }
 
 func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
@@ -98,7 +129,8 @@ func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{cfg: cfg, store: st, log: logger, ctx: ctx, start: time.Now(), devs: map[string]*dev{}, cancels: map[string]context.CancelFunc{}}
+	s := &Server{cfg: cfg, store: st, log: logger, ctx: ctx, devs: map[string]*dev{}, cancels: map[string]context.CancelFunc{}}
+	s.start = s.now()
 	rows, err := st.devices()
 	if err != nil {
 		return nil, err
@@ -147,19 +179,19 @@ func (s *Server) OnNotify(f func(Notification)) {
 }
 
 func (s *Server) monitor() {
-	t := time.NewTicker(time.Second)
+	t := s.clock().NewTicker(time.Second)
 	defer t.Stop()
 	for {
 		select {
 		case <-s.ctx.Done():
 			return
-		case <-t.C:
+		case <-t.C():
 		}
 		for _, v := range s.allDevs() {
 			v.mu.Lock()
 			// After a restart, agents need a moment to reconnect before silence means anything.
-			idle := (v.d.State == api.StateReady || v.d.State == api.StateNew) && time.Since(s.start) > s.cfg.OfflineAfter
-			if idle && !v.d.LastSeen.IsZero() && time.Since(v.d.LastSeen) > s.cfg.OfflineAfter {
+			idle := (v.d.State == api.StateReady || v.d.State == api.StateNew) && s.since(s.start) > s.cfg.OfflineAfter
+			if idle && !v.d.LastSeen.IsZero() && s.since(v.d.LastSeen) > s.cfg.OfflineAfter {
 				v.restore = v.d.State
 				why := "no heartbeat since " + v.d.LastSeen.Format(time.TimeOnly)
 				if !v.asleep.IsZero() {
@@ -235,7 +267,7 @@ func (s *Server) attachOOB(v *dev) {
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(backoff):
+			case <-s.clock().After(backoff):
 			}
 			if backoff < time.Minute {
 				backoff *= 2
@@ -255,7 +287,7 @@ func (s *Server) appendSerial(name, line string) {
 	if err != nil {
 		return
 	}
-	fmt.Fprintf(f, "%s %s\n", time.Now().Format("2006-01-02T15:04:05.000"), line)
+	fmt.Fprintf(f, "%s %s\n", s.now().Format("2006-01-02T15:04:05.000"), line)
 	f.Close()
 }
 
@@ -299,7 +331,7 @@ func (s *Server) updateJob(j *api.Job, f func(*api.Job)) {
 	jobMu.Lock()
 	defer jobMu.Unlock()
 	f(j)
-	j.Updated = time.Now()
+	j.Updated = s.now()
 	if err := s.store.saveJob(j); err != nil {
 		s.log.Printf("save job %s: %v", j.ID, err)
 	}
@@ -487,7 +519,7 @@ func (s *Server) hEnrollToken(w http.ResponseWriter, r *http.Request) {
 		req.Model = api.ModelLaptop
 	}
 	tok := "enr_" + randHex(16)
-	exp := time.Now().Add(24 * time.Hour)
+	exp := s.now().Add(24 * time.Hour)
 	if err := s.store.addToken(hashSecret(tok), req, exp); err != nil {
 		httpErr(w, 500, "%v", err)
 		return
@@ -501,7 +533,7 @@ func (s *Server) hEnroll(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, "%v", err)
 		return
 	}
-	t, err := s.store.takeToken(hashSecret(req.Token))
+	t, err := s.store.takeToken(hashSecret(req.Token), s.now())
 	if err != nil {
 		httpErr(w, 403, "enrollment token unknown, used or expired")
 		return
@@ -591,7 +623,7 @@ func (s *Server) storeArtifact(r io.Reader) (string, int64, error) {
 		return "", 0, err
 	}
 	sha := hex.EncodeToString(h.Sum(nil))
-	now := time.Now()
+	now := s.now()
 	os.Chtimes(tmp.Name(), now, now)
 	return sha, n, os.Rename(tmp.Name(), s.artifactPath(sha))
 }
@@ -669,7 +701,7 @@ func (s *Server) hDevice(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, struct {
 			DeviceView
 			Events []api.KernelEvent `json:"recent_events"`
-		}{s.view(v), v.eventsSince(time.Now().Add(-24 * time.Hour))})
+		}{s.view(v), v.eventsSince(s.now().Add(-24 * time.Hour))})
 	}
 }
 
@@ -721,11 +753,11 @@ func (s *Server) hLease(w http.ResponseWriter, r *http.Request) {
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if l := v.d.Lease; l != nil && time.Now().Before(l.Expires) && l.Holder != req.Holder {
+	if l := v.d.Lease; l != nil && s.now().Before(l.Expires) && l.Holder != req.Holder {
 		httpErr(w, 409, "%s is leased by %s until %s", v.d.Name, l.Holder, l.Expires.Format(time.TimeOnly))
 		return
 	}
-	v.d.Lease = &api.Lease{Holder: req.Holder, Expires: time.Now().Add(time.Duration(req.TTLSec) * time.Second)}
+	v.d.Lease = &api.Lease{Holder: req.Holder, Expires: s.now().Add(time.Duration(req.TTLSec) * time.Second)}
 	v.saveLocked()
 	writeJSON(w, v.d.Lease)
 }
@@ -738,7 +770,7 @@ func (s *Server) hRelease(w http.ResponseWriter, r *http.Request) {
 	holder := r.URL.Query().Get("holder")
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if l := v.d.Lease; l != nil && holder != "" && l.Holder != holder && time.Now().Before(l.Expires) {
+	if l := v.d.Lease; l != nil && holder != "" && l.Holder != holder && s.now().Before(l.Expires) {
 		httpErr(w, 409, "leased by %s, not %s", l.Holder, holder)
 		return
 	}
@@ -763,7 +795,7 @@ func (s *Server) hReset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A reset reboots the Mac, so a lease fences it like a job.
-	if lease != nil && time.Now().Before(lease.Expires) && lease.Holder != by {
+	if lease != nil && s.now().Before(lease.Expires) && lease.Holder != by {
 		httpErr(w, 409, "%s is leased by %s until %s; only the lease holder can reset it", v.d.Name, lease.Holder, lease.Expires.Format(time.DateTime))
 		return
 	}
@@ -920,7 +952,7 @@ func (s *Server) Submit(spec api.JobSpec) (*api.Job, int, error) {
 	if l := d.Lease; l != nil && l.Holder != spec.Holder {
 		return nil, 409, fmt.Errorf("%s is leased by %s until %s", d.Name, l.Holder, l.Expires.Format(time.TimeOnly))
 	}
-	now := time.Now()
+	now := s.now()
 	j := &api.Job{ID: "j" + now.Format("0102-150405") + "-" + randHex(2), Spec: spec, State: api.JobQueued, Created: now, Updated: now,
 		Events: []api.JobEvent{{Time: now, Msg: "queued"}}}
 	if err := s.store.saveJob(j); err != nil {
@@ -962,21 +994,21 @@ func (s *Server) hWait(w http.ResponseWriter, r *http.Request) {
 	if sec <= 0 || sec > 3600 {
 		sec = 60
 	}
-	deadline := time.Now().Add(time.Duration(sec) * time.Second)
+	deadline := s.now().Add(time.Duration(sec) * time.Second)
 	for {
 		j, err := s.store.job(id)
 		if err != nil {
 			httpErr(w, 404, "no job %s", id)
 			return
 		}
-		if j.State == api.JobDone || time.Now().After(deadline) {
+		if j.State == api.JobDone || s.now().After(deadline) {
 			writeJSON(w, j)
 			return
 		}
 		select {
 		case <-r.Context().Done():
 			return
-		case <-time.After(500 * time.Millisecond):
+		case <-s.clock().After(500 * time.Millisecond):
 		}
 	}
 }
