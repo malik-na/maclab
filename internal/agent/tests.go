@@ -52,6 +52,10 @@ func (l *Linux) RunTest(ctx context.Context, job string, t api.TestSpec, fetch F
 		return fail(errors.New("test has neither builtin nor script"))
 	}
 
+	if err := l.awaitLabBootLock(ctx); err != nil {
+		return fail(err)
+	}
+
 	timeout := time.Duration(t.TimeoutSec) * time.Second
 	if timeout <= 0 {
 		timeout = 5 * time.Minute
@@ -60,6 +64,11 @@ func (l *Linux) RunTest(ctx context.Context, job string, t api.TestSpec, fetch F
 	defer cancel()
 
 	env := append(os.Environ(), "MACLAB_OUT="+outDir, "MACLAB_JOB="+job, "MACLAB_TEST="+t.Name)
+	skip := "MACLAB_SKIP_ON_SCREEN="
+	if t.SkipOnScreen {
+		skip += "1"
+	}
+	env = append(env, skip)
 	var cmd *exec.Cmd
 	if t.GUI {
 		if l.GUIUser == "" {
@@ -71,7 +80,7 @@ func (l *Linux) RunTest(ctx context.Context, job string, t api.TestSpec, fetch F
 		}
 		chownTree(outDir, u)
 		os.Chmod(script, 0o755)
-		args := append([]string{"-u", u.Username, "--", "env"}, append(genv, "MACLAB_OUT="+outDir, "MACLAB_JOB="+job, "bash", script)...)
+		args := append([]string{"-u", u.Username, "--", "env"}, append(genv, "MACLAB_OUT="+outDir, "MACLAB_JOB="+job, skip, "bash", script)...)
 		cmd = exec.CommandContext(tctx, "runuser", args...)
 	} else {
 		cmd = exec.CommandContext(tctx, "bash", script)
