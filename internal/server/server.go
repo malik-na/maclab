@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"path"
@@ -32,16 +31,16 @@ import (
 )
 
 type Config struct {
-	DataDir      string
-	AdminToken   string
-	Interval     time.Duration // agent heartbeat interval
-	BootTimeout  time.Duration // default time for a Mac to come back after a reboot
-	OfflineAfter time.Duration
-	NtfyURL      string
-	NotifyCmd    string
-	// Trust lists networks whose clients get admin access without a token,
-	// judged by the connection's source address only.
-	Trust []*net.IPNet
+	DataDir string
+	// FirstMaintainer and FirstMaintainerToken name the Maintainer a labd
+	// with none starts with: on upgrade, whoever held the old admin token.
+	FirstMaintainer      string
+	FirstMaintainerToken string
+	Interval             time.Duration // agent heartbeat interval
+	BootTimeout          time.Duration // default time for a Mac to come back after a reboot
+	OfflineAfter         time.Duration
+	NtfyURL              string
+	NotifyCmd            string
 	// OOBFactory builds a controller for a device; tests swap in fakes.
 	OOBFactory func(*api.Device) (oob.Controller, error)
 	// BuilderToken authenticates builder hosts; empty disables builds.
@@ -73,6 +72,7 @@ type Server struct {
 	hub         hub
 	builds      *buildMgr
 	notifyHooks []func(Notification)
+	conns       maintainerConns
 	serialMu    sync.Mutex
 }
 
@@ -131,6 +131,9 @@ func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
 	}
 	s := &Server{cfg: cfg, store: st, log: logger, ctx: ctx, devs: map[string]*dev{}, cancels: map[string]context.CancelFunc{}}
 	s.start = s.now()
+	if err := s.firstMaintainer(); err != nil {
+		return nil, err
+	}
 	rows, err := st.devices()
 	if err != nil {
 		return nil, err
@@ -368,51 +371,53 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("GET /api/agent/artifacts/{sha}", s.agent(s.hAgentArtifact))
 	m.HandleFunc("POST /api/agent/upload", s.agent(s.hUpload))
 
-	m.HandleFunc("GET /api/auth", s.hAuth)
-	m.HandleFunc("GET /api/devices", s.admin(s.hDevices))
-	m.HandleFunc("GET /api/devices/{name}", s.admin(s.hDevice))
-	m.HandleFunc("PATCH /api/devices/{name}", s.admin(s.hPatchDevice))
-	m.HandleFunc("POST /api/devices/{name}/lease", s.admin(s.hLease))
-	m.HandleFunc("DELETE /api/devices/{name}/lease", s.admin(s.hRelease))
-	m.HandleFunc("POST /api/devices/{name}/reset", s.admin(s.hReset))
-	m.HandleFunc("GET /api/devices/{name}/serial", s.admin(s.hSerial))
-	m.HandleFunc("GET /api/devices/{name}/oob", s.admin(s.hOOBStatus))
-	m.HandleFunc("GET /api/stream", s.admin(s.hStream))
-	m.HandleFunc("POST /api/devices/{name}/screenshot", s.admin(s.hScreenshot))
-	m.HandleFunc("GET /api/devices/{name}/screen", s.admin(s.hScreen))
-	m.HandleFunc("GET /api/devices/{name}/screens", s.admin(s.hScreens))
-	m.HandleFunc("GET /api/devices/{name}/screens/{file}", s.admin(s.hScreen))
-	m.HandleFunc("GET /api/devices/{name}/logs", s.admin(s.hLogs))
-	m.HandleFunc("GET /api/devices/{name}/console", s.admin(s.hConsoleRaw))
-	m.HandleFunc("POST /api/devices/{name}/console", s.admin(s.hConsoleWrite))
-	m.HandleFunc("POST /api/devices/{name}/console/arm", s.admin(s.hConsoleArm))
+	m.HandleFunc("GET /api/devices", s.maintainer(s.hDevices))
+	m.HandleFunc("GET /api/devices/{name}", s.maintainer(s.hDevice))
+	m.HandleFunc("PATCH /api/devices/{name}", s.maintainer(s.hPatchDevice))
+	m.HandleFunc("POST /api/devices/{name}/lease", s.maintainer(s.hLease))
+	m.HandleFunc("DELETE /api/devices/{name}/lease", s.maintainer(s.hRelease))
+	m.HandleFunc("POST /api/devices/{name}/reset", s.maintainer(s.hReset))
+	m.HandleFunc("GET /api/devices/{name}/serial", s.maintainer(s.hSerial))
+	m.HandleFunc("GET /api/devices/{name}/oob", s.maintainer(s.hOOBStatus))
+	m.HandleFunc("GET /api/stream", s.maintainer(s.hStream))
+	m.HandleFunc("POST /api/devices/{name}/screenshot", s.maintainer(s.hScreenshot))
+	m.HandleFunc("GET /api/devices/{name}/screen", s.maintainer(s.hScreen))
+	m.HandleFunc("GET /api/devices/{name}/screens", s.maintainer(s.hScreens))
+	m.HandleFunc("GET /api/devices/{name}/screens/{file}", s.maintainer(s.hScreen))
+	m.HandleFunc("GET /api/devices/{name}/logs", s.maintainer(s.hLogs))
+	m.HandleFunc("GET /api/devices/{name}/console", s.maintainer(s.hConsoleRaw))
+	m.HandleFunc("POST /api/devices/{name}/console", s.maintainer(s.hConsoleWrite))
+	m.HandleFunc("POST /api/devices/{name}/console/arm", s.maintainer(s.hConsoleArm))
 	m.HandleFunc("POST /api/agent/screen", s.agent(s.hAgentScreen))
-	m.HandleFunc("POST /api/enroll-tokens", s.admin(s.hEnrollToken))
-	m.HandleFunc("POST /api/artifacts", s.admin(s.hPutArtifact))
-	m.HandleFunc("POST /api/jobs", s.admin(s.hSubmit))
-	m.HandleFunc("GET /api/jobs", s.admin(s.hJobs))
-	m.HandleFunc("GET /api/jobs/{id}", s.admin(s.hJob))
-	m.HandleFunc("GET /api/jobs/{id}/wait", s.admin(s.hWait))
-	m.HandleFunc("POST /api/jobs/{id}/cancel", s.admin(s.hCancel))
-	m.HandleFunc("POST /api/jobs/{id}/publish", s.admin(s.hPublish))
-	m.HandleFunc("GET /api/jobs/{id}/files/{name...}", s.admin(s.hJobFile))
+	m.HandleFunc("POST /api/enroll-tokens", s.maintainer(s.hEnrollToken))
+	m.HandleFunc("POST /api/artifacts", s.maintainer(s.hPutArtifact))
+	m.HandleFunc("POST /api/jobs", s.maintainer(s.hSubmit))
+	m.HandleFunc("GET /api/jobs", s.maintainer(s.hJobs))
+	m.HandleFunc("GET /api/jobs/{id}", s.maintainer(s.hJob))
+	m.HandleFunc("GET /api/jobs/{id}/wait", s.maintainer(s.hWait))
+	m.HandleFunc("POST /api/jobs/{id}/cancel", s.maintainer(s.hCancel))
+	m.HandleFunc("POST /api/jobs/{id}/publish", s.maintainer(s.hPublish))
+	m.HandleFunc("GET /api/jobs/{id}/files/{name...}", s.maintainer(s.hJobFile))
 	m.HandleFunc("POST /api/builder/poll", s.builderAuth(s.hBuilderPoll))
 	m.HandleFunc("POST /api/builder/builds/{id}/progress", s.builderAuth(s.hBuilderProgress))
 	m.HandleFunc("POST /api/builder/builds/{id}/done", s.builderAuth(s.hBuilderDone))
 	m.HandleFunc("POST /api/builder/artifacts", s.builderAuth(s.hBuilderArtifact))
 	m.HandleFunc("GET /api/builder/artifacts/{sha}", s.builderAuth(s.hAgentArtifact))
-	m.HandleFunc("POST /api/builds", s.admin(s.hCreateBuild))
-	m.HandleFunc("POST /api/installed/{release}/manifest", s.admin(s.hFreezeManifest))
-	m.HandleFunc("POST /api/installed/{release}/entry/{device}", s.admin(s.hFreezeEntry))
-	m.HandleFunc("POST /api/installed/{release}/promote", s.admin(s.hPromote))
-	m.HandleFunc("GET /api/installed/{release}", s.admin(s.hInstalledStatus))
-	m.HandleFunc("GET /api/builds", s.admin(s.hBuilds))
-	m.HandleFunc("GET /api/builds/{id}", s.admin(s.hBuild))
-	m.HandleFunc("GET /api/builds/{id}/log", s.admin(s.hBuildLog))
-	m.HandleFunc("GET /api/builds/{id}/files/{name}", s.admin(s.hBuildFile))
-	m.HandleFunc("POST /api/builds/{id}/cancel", s.admin(s.hCancelBuild))
-	m.HandleFunc("GET /api/builders", s.admin(s.hBuilders))
-	m.HandleFunc("POST /api/devices/{name}/exec", s.admin(s.hExec))
+	m.HandleFunc("POST /api/builds", s.maintainer(s.hCreateBuild))
+	m.HandleFunc("POST /api/installed/{release}/manifest", s.maintainer(s.hFreezeManifest))
+	m.HandleFunc("POST /api/installed/{release}/entry/{device}", s.maintainer(s.hFreezeEntry))
+	m.HandleFunc("POST /api/installed/{release}/promote", s.maintainer(s.hPromote))
+	m.HandleFunc("GET /api/installed/{release}", s.maintainer(s.hInstalledStatus))
+	m.HandleFunc("GET /api/builds", s.maintainer(s.hBuilds))
+	m.HandleFunc("GET /api/builds/{id}", s.maintainer(s.hBuild))
+	m.HandleFunc("GET /api/builds/{id}/log", s.maintainer(s.hBuildLog))
+	m.HandleFunc("GET /api/builds/{id}/files/{name}", s.maintainer(s.hBuildFile))
+	m.HandleFunc("POST /api/builds/{id}/cancel", s.maintainer(s.hCancelBuild))
+	m.HandleFunc("GET /api/builders", s.maintainer(s.hBuilders))
+	m.HandleFunc("POST /api/devices/{name}/exec", s.maintainer(s.hExec))
+	m.HandleFunc("GET /api/maintainers", s.maintainer(s.hMaintainers))
+	m.HandleFunc("POST /api/maintainers", s.maintainer(s.hAddMaintainer))
+	m.HandleFunc("DELETE /api/maintainers/{name}", s.maintainer(s.hRemoveMaintainer))
 	web.Register(m)
 	return m
 }
@@ -428,58 +433,6 @@ func httpErr(w http.ResponseWriter, code int, format string, args ...any) {
 
 func bearer(r *http.Request) string {
 	return strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-}
-
-func (s *Server) admin(h http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if subtle.ConstantTimeCompare([]byte(bearer(r)), []byte(s.cfg.AdminToken)) != 1 && !s.trusted(r) {
-			httpErr(w, 401, "bad admin token")
-			return
-		}
-		h(w, r)
-	}
-}
-
-// trusted reports whether the client connected from a trusted network. It
-// uses the TCP peer address, never a forwarded header a client could forge.
-func (s *Server) trusted(r *http.Request) bool {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return false
-	}
-	ip := net.ParseIP(host)
-	for _, n := range s.cfg.Trust {
-		if ip != nil && n.Contains(ip) {
-			return true
-		}
-	}
-	return false
-}
-
-// ParseTrust turns "10.1.1.0/24,127.0.0.1" into networks; a bare IP is one host.
-func ParseTrust(v string) ([]*net.IPNet, error) {
-	var out []*net.IPNet
-	for _, f := range strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == ' ' }) {
-		if !strings.Contains(f, "/") {
-			if strings.Contains(f, ":") {
-				f += "/128"
-			} else {
-				f += "/32"
-			}
-		}
-		_, n, err := net.ParseCIDR(f)
-		if err != nil {
-			return nil, fmt.Errorf("trust %q: %w", f, err)
-		}
-		out = append(out, n)
-	}
-	return out, nil
-}
-
-// hAuth tells the UI whether this client needs a token at all.
-func (s *Server) hAuth(w http.ResponseWriter, r *http.Request) {
-	t := s.trusted(r)
-	writeJSON(w, map[string]bool{"trusted": t, "token_required": !t})
 }
 
 type ctxKey struct{}
@@ -850,7 +803,7 @@ func (s *Server) hSubmit(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, "%v", err)
 		return
 	}
-	j, code, err := s.Submit(spec)
+	j, code, err := s.submit(maintainerName(r), spec)
 	if err != nil {
 		httpErr(w, code, "%v", err)
 		return
@@ -858,8 +811,11 @@ func (s *Server) hSubmit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, j)
 }
 
-// Submit validates and queues a job.
-func (s *Server) Submit(spec api.JobSpec) (*api.Job, int, error) {
+// Submit validates and queues a job that labd queues itself, for no Maintainer.
+func (s *Server) Submit(spec api.JobSpec) (*api.Job, int, error) { return s.submit("", spec) }
+
+// submit validates and queues a job for the Maintainer who asked.
+func (s *Server) submit(maintainer string, spec api.JobSpec) (*api.Job, int, error) {
 	v := s.dev(spec.Device)
 	if v == nil {
 		return nil, 404, fmt.Errorf("no device %q", spec.Device)
@@ -953,7 +909,7 @@ func (s *Server) Submit(spec api.JobSpec) (*api.Job, int, error) {
 		return nil, 409, fmt.Errorf("%s is leased by %s until %s", d.Name, l.Holder, l.Expires.Format(time.TimeOnly))
 	}
 	now := s.now()
-	j := &api.Job{ID: "j" + now.Format("0102-150405") + "-" + randHex(2), Spec: spec, State: api.JobQueued, Created: now, Updated: now,
+	j := &api.Job{ID: "j" + now.Format("0102-150405") + "-" + randHex(2), Spec: spec, Maintainer: maintainer, State: api.JobQueued, Created: now, Updated: now,
 		Events: []api.JobEvent{{Time: now, Msg: "queued"}}}
 	if err := s.store.saveJob(j); err != nil {
 		return nil, 500, err

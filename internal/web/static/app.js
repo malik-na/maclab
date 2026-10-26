@@ -70,7 +70,7 @@ function dur(s) {
 const since = t => (Date.now() - new Date(t)) / 1000;
 
 // ——— API ———————————————————————————————————————————————————————————————
-// On a trusted network labd needs no token; otherwise the saved one is sent.
+// Every call carries the saved Maintainer token.
 const authH = () => S.token ? { Authorization: 'Bearer ' + S.token } : {};
 async function api(path, opt = {}) {
   const r = await fetch(path, { ...opt, headers: { ...(opt.headers || {}), ...authH() } });
@@ -301,7 +301,7 @@ function bar() {
     `<button class="stat" onclick="go('#/jobs')" title="jobs running or queued">${ic('pulse')}<b>${running}</b></button>`,
     `<button class="stat hide-sm" id="theme-btn" title="theme: ${esc(t?.title || '')}">${ic('palette')}</button>`,
     `<button class="stat" title="${!S.online ? 'labd unreachable' : S.stream === 'up' ? 'connected · live stream' : 'connected · polling'}"><span class="live ${S.online ? '' : 'down'}"></span></button>`,
-    S.open ? '' : `<button class="stat" onclick="lock()" title="lock">${ic('lock')}</button>`,
+    `<button class="stat" onclick="lock()" title="lock">${ic('lock')}</button>`,
   ].join(''));
   const tb = $('#theme-btn');
   if (tb) tb.onclick = e => themeMenu(e.currentTarget);
@@ -1472,9 +1472,9 @@ async function liveTick(devices) {
 
 // ——— server-sent events ———
 // labd streams device, job, serial, kernel-event and screen events. EventSource
-// cannot send the admin token, so this reads the stream with fetch.
+// cannot send the Maintainer token, so this reads the stream with fetch.
 async function stream() {
-  if (S.streamCtl || S.locked || (!S.token && !S.open)) return;
+  if (S.streamCtl || S.locked || !S.token) return;
   const ctl = new AbortController();
   S.streamCtl = ctl;
   let retry = 3000;
@@ -1641,7 +1641,7 @@ function mainMenu(anchor) {
   menu(anchor, `<div class="mh"><span>Omarchy · maclab</span><span class="og" style="color:var(--accent)">${OMARCHY}</span></div>
     ${VIEWS.map(([v], i) => `<button data-go="${v}" class="${v === S.view ? 'on' : ''}">${ic({ macs: 'laptop', jobs: 'history', builds: 'hammer', run: 'rocket', live: 'monitor' }[v])} ${v[0].toUpperCase() + v.slice(1)}<span class="r">${i + 1}</span></button>`).join('')}
     <hr><button data-theme>${ic('palette')} Style<span class="r">&gt;</span></button>
-    ${S.open ? '' : `<button data-lock>${ic('lock')} Lock<span class="r">L</span></button>`}`, m => {
+    <button data-lock>${ic('lock')} Lock<span class="r">L</span></button>`, m => {
     $$('[data-go]', m).forEach(b => b.onclick = () => go('#/' + b.dataset.go));
     $('[data-theme]', m).onclick = e => { e.stopPropagation(); themeMenu(anchor); };
     $('[data-lock]', m) && ($('[data-lock]', m).onclick = () => lock());
@@ -1678,9 +1678,9 @@ async function lock(msg = '') {
   l.innerHTML = `<div class="inner">
     <div class="logo">${logo}</div>
     <div class="time" id="lock-time"></div><div class="date" id="lock-date"></div>
-    <form id="lock-form"><input type="password" id="lock-token" placeholder="labd admin token" autocomplete="current-password" autofocus>
+    <form id="lock-form"><input type="password" id="lock-token" placeholder="your Maintainer token" autocomplete="current-password" autofocus>
       <div class="msg ${msg ? 'bad' : ''}" id="lock-msg">${esc(msg)}</div></form>
-    <div class="hint">cat ~/.local/share/maclab/admin.token</div></div>`;
+    <div class="hint">from lab maintainer add; the first Maintainer's is in ~/.local/share/maclab/admin.token</div></div>`;
   clock();
   $('#lock-token').focus();
   $('#lock-form').onsubmit = async e => {
@@ -1708,7 +1708,7 @@ async function logoSVG() {
 // ——— polling ———————————————————————————————————————————————————————————————
 let ticking = false;
 async function tick() {
-  if (ticking || S.locked || (!S.token && !S.open)) return;
+  if (ticking || S.locked || !S.token) return;
   ticking = true;
   S.lastTick = Date.now();
   try {
@@ -1739,19 +1739,14 @@ document.addEventListener('keydown', e => {
   if (S.locked || /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName) || document.activeElement?.closest?.('.xterm')) return;
   const n = +e.key;
   if (n >= 1 && n <= VIEWS.length && !e.ctrlKey && !e.metaKey && !e.altKey) go('#/' + VIEWS[n - 1][0]);
-  if (e.key === 'l' && !e.ctrlKey && !e.metaKey && !S.open) lock();
+  if (e.key === 'l' && !e.ctrlKey && !e.metaKey) lock();
 });
 
 // ——— start ———————————————————————————————————————————————————————————————————
 (async function start() {
   shell();
   await Promise.all([loadThemes(), logoSVG()]);
-  try { S.open = !(await (await fetch('/api/auth')).json()).token_required; } catch { S.open = false; }
-  if (!S.open && !S.token) {
-    // An older labd has no /api/auth: try without a token before asking for one.
-    S.open = (await fetch('/api/devices').catch(() => null))?.ok || false;
-  }
-  if (!S.open && !S.token) { lock(); return; }
+  if (!S.token) { lock(); return; }
   route();
   stream();
 })();

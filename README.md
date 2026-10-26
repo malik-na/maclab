@@ -106,10 +106,17 @@ Each Mac gets a recovery tier: 0 = panic reboot + one-shot fallback,
 
 ```sh
 make                                 # binaries in bin/
-labd                                 # prints the admin token on first start
-lab login http://<labd-host>:7770 <admin-token>
+labd --maintainer <you>              # first start: you become the first Maintainer (default $USER)
+lab login http://<labd-host>:7770 "$(cat ~/.local/share/maclab/admin.token)"
 lab enroll m1air --label "MacBook Air M1, left desk"
 ```
+
+Each Maintainer has their own labd token. `lab maintainer add <name>` prints
+a new one once (labd keeps only its hash); `lab maintainer list` and
+`lab maintainer remove <name>` do the rest, and removing someone revokes their
+token at once. Jobs and Promotions record the Maintainer whose token asked.
+Upgrading from a labd with a single admin token keeps that token, in the same
+`admin.token` file, as the first Maintainer's (`--maintainer`, default `$USER`).
 
 On the Mac:
 
@@ -323,16 +330,11 @@ simulated Mac (`internal/agent/sim.go`):
 
 `lab-agent sim --server .. --token ..` enrolls a simulated Mac against a real labd.
 
-## Phones and the LAN
+## Phones
 
-`labd --trust 192.168.1.0/24,127.0.0.1` (or `MACLAB_TRUST`) lets browsers on
-those networks use the UI with no admin token, so a phone can just open
-`http://<labd-host>:7770`. It judges the TCP peer address only, never a
-forwarded header. Everyone on a trusted network can reboot Macs, open
-their serial shell and run commands on them as root, so trust only a
-network you'd hand a root shell to. A token still works from anywhere. On a
-phone the UI switches to a bottom tab bar and can be added to the home
-screen.
+Open `http://<labd-host>:7770` and enter your Maintainer token; the UI keeps
+it. Every client needs a token, whatever network it's on. On a phone the UI
+switches to a bottom tab bar and can be added to the home screen.
 
 ## License
 

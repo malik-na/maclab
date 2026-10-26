@@ -385,16 +385,17 @@ type OMTCheck struct {
 }
 
 type Job struct {
-	ID       string     `json:"id"`
-	Spec     JobSpec    `json:"spec"`
-	State    JobState   `json:"state"`
-	Outcome  string     `json:"outcome,omitempty"`
-	Summary  string     `json:"summary,omitempty"`
-	Created  time.Time  `json:"created"`
-	Updated  time.Time  `json:"updated"`
-	Events   []JobEvent `json:"events"`
-	Result   JobResult  `json:"result"`
-	Canceled bool       `json:"canceled,omitempty"`
+	ID         string     `json:"id"`
+	Spec       JobSpec    `json:"spec"`
+	State      JobState   `json:"state"`
+	Outcome    string     `json:"outcome,omitempty"`
+	Summary    string     `json:"summary,omitempty"`
+	Created    time.Time  `json:"created"`
+	Updated    time.Time  `json:"updated"`
+	Events     []JobEvent `json:"events"`
+	Result     JobResult  `json:"result"`
+	Canceled   bool       `json:"canceled,omitempty"`
+	Maintainer string     `json:"maintainer,omitempty"` // who submitted it, from their token; empty when labd queued it
 }
 
 type EnrollRequest struct {
@@ -559,4 +560,22 @@ type ExecResult struct {
 	Stderr   string  `json:"stderr"`
 	Seconds  float64 `json:"seconds"`
 	Via      string  `json:"via"` // agent or serial
+}
+
+// ---- Maintainers: the named people with their own access to labd ----
+
+type Maintainer struct {
+	Name    string    `json:"name"`
+	Added   time.Time `json:"added"`
+	AddedBy string    `json:"added_by,omitempty"` // empty for the first Maintainer
+}
+
+type MaintainerRequest struct {
+	Name string `json:"name"`
+}
+
+// NewMaintainer carries a new Maintainer's token, the only time labd shows it.
+type NewMaintainer struct {
+	Maintainer
+	Token string `json:"token"`
 }
