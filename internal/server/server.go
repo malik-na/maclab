@@ -50,8 +50,12 @@ type Config struct {
 	// WatchdogOpenTimeout is watchdog.open_timeout on every Lab boot's command
 	// line; 0 is lab-agent's default (150 s).
 	WatchdogOpenTimeout time.Duration
-	NtfyURL             string
-	NotifyCmd           string
+	// RebootWarning is how long before a Volunteer job's first reboot its Mac
+	// shows the Volunteer a notice, and how long the job waits after it; 0 is
+	// no notice and no wait. labd's flag defaults to 5m.
+	RebootWarning time.Duration
+	NtfyURL       string
+	NotifyCmd     string
 	// OOBFactory builds a controller for a device; tests swap in fakes.
 	OOBFactory func(*api.Device) (oob.Controller, error)
 	// BuilderToken authenticates builder hosts; empty disables builds.
@@ -114,6 +118,10 @@ func (s *Server) withTimeout(parent context.Context, d time.Duration) (context.C
 	}()
 	return ctx, cancel
 }
+
+// SetRebootWarning sets how long before a Volunteer job's first reboot labd
+// has the Mac warn its Volunteer (Config.RebootWarning).
+func (c *Config) SetRebootWarning(d time.Duration) { c.RebootWarning = d }
 
 func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
 	if logger == nil {
