@@ -272,6 +272,36 @@ Reports carry new entries to labd, whose copy Maintainers read with `lab audit
 <mac>` (`GET /api/devices/{n}/audit`). `status` shows the Access level and the
 latest entries.
 
+### Leaving
+
+A Volunteer can leave at any time, and the Maintainers can end an enrollment.
+Either way nothing of the lab is left on the Mac.
+
+```sh
+sudo lab-agent leave          # asks first; --yes answers for you (scripts)
+lab remove ada-mbp            # a Maintainer ends the enrollment in labd
+```
+
+`leave` is immediate and works with labd down. It stops any job (the job ends
+`incomplete`), reboots a Lab boot to the Known-good kernel, removes the lab's
+boot entries (its block in `limine.conf`, or its hook in GRUB's `custom.cfg`,
+leaving every other line as it was, and the staged kernels), its systemd
+units, the Lab-boot autologin drop-in, sysctl and watchdog files and the device
+secret, and tells labd. If labd can't be reached, lab-agent keeps trying
+and finishes leaving once it has told labd. Then it prints what is left to
+remove by hand: the lab-agent package and the Tailscale node. The Audit log
+(`/var/lib/maclab/audit.log`) and Access level stay, and `log` still reads
+them. Only a Volunteer's Mac has `leave`; a Lab-owned Mac's enrollment is
+ended by the Maintainers.
+
+`lab remove` (`DELETE /api/devices/{name}`) takes the Mac out of labd at once:
+its device secret is refused from that moment, whether or not the Mac checks in
+again, and a job on it ends `incomplete` and is not retried. The Volunteer
+is told on the Mac's own ntfy topic and, at its next check-in, on the desktop,
+which Maintainer ended it. At that check-in lab-agent does what `leave` does
+and appends the Maintainer to the Audit log. To enroll the Mac again, a
+Maintainer makes a new token (`lab enroll`); the Mac's Kind follows that token.
+
 Publishing omarchy-m-test reports is off on a Volunteer's Mac until its
 Volunteer runs `publish on`, whatever `--omt-publish` or a job's `--publish`
 asks; `lab publish` is refused too. Each `publish on` lists the deletion link

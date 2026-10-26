@@ -36,6 +36,8 @@ type dev struct {
 	dirty    bool // a lab kernel may still be staged on the Mac
 	restore  api.DeviceState
 	queue    chan string
+	stop     chan struct{} // closed when the Mac's enrollment ends
+	gone     string        // why it ended, once it has
 	oob      oob.Controller
 	oobStop  context.CancelFunc
 
@@ -58,7 +60,7 @@ type dev struct {
 
 func newDev(s *Server, d api.Device, secretHash string) *dev {
 	v := &dev{s: s, d: d, secretHash: secretHash, inflight: map[string]time.Time{}, sent: map[string]api.Command{}, target: map[string]string{},
-		results: map[string]api.CommandResult{}, changed: make(chan struct{}), queue: make(chan string, 256), auditHave: -1}
+		results: map[string]api.CommandResult{}, changed: make(chan struct{}), queue: make(chan string, 256), stop: make(chan struct{}), auditHave: -1}
 	return v
 }
 
@@ -435,7 +437,7 @@ func (v *dev) callNote(ctx context.Context, kind, job string, args any, timeout 
 				delete(v.results, id)
 				return true
 			}
-			if v.d.BootID != boot {
+			if v.gone != "" || v.d.BootID != boot {
 				lost = true
 				return true
 			}

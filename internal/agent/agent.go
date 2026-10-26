@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/iconidentify/maclab/internal/api"
@@ -111,7 +112,10 @@ type Agent struct {
 	auditSent         int64    // how much of the Audit log labd's copy holds, in bytes
 	awake             awakeHold
 	wake              chan struct{}
-	life              context.Context // commands outlive the poll that delivered them
+	life              context.Context    // commands outlive the poll that delivered them
+	stop              context.CancelFunc // ends Run: the Mac left the lab
+	endedOnce         sync.Once
+	hasLeft           atomic.Bool
 }
 
 func New(cfg *Config, sys System, logger *log.Logger) *Agent {
@@ -142,6 +146,8 @@ func Enroll(ctx context.Context, server, token string, facts api.Facts) (*api.En
 // until it has a command for this Mac, so commands arrive at once. Results and
 // kernel events go out on their own request the moment they exist.
 func (a *Agent) Run(ctx context.Context) error {
+	ctx, a.stop = context.WithCancel(ctx)
+	defer a.stop()
 	a.life = ctx
 	go a.sys.WatchKernel(ctx, func(line string) {
 		if k := detect.Classify(line); k != "" {
@@ -157,6 +163,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	go a.sys.WatchSleep(ctx, a.sleeping)
 	go a.reportLoop(ctx)
 	go a.watchWindow(ctx)
+	go a.watchLeft(ctx)
 	var pollMu sync.Mutex
 	var pollCancel context.CancelFunc
 	if s, ok := a.sys.(*Sim); ok {
@@ -174,6 +181,10 @@ func (a *Agent) Run(ctx context.Context) error {
 		})
 	}
 	for ctx.Err() == nil {
+		if a.hasLeft.Load() {
+			sleepCtx(ctx, a.clock(), 100*time.Millisecond) // no more check-ins: the Mac left
+			continue
+		}
 		if !a.sys.Alive() {
 			sleepCtx(ctx, a.clock(), 100*time.Millisecond)
 			continue
@@ -184,6 +195,10 @@ func (a *Agent) Run(ctx context.Context) error {
 		pollMu.Unlock()
 		err := a.poll(pctx)
 		cancel()
+		if by, ok := endedBy(err); ok {
+			a.enrollmentEnded(by)
+			continue
+		}
 		if pctx.Err() != nil && ctx.Err() == nil {
 			continue // the machine rebooted under the long poll
 		}
@@ -191,6 +206,9 @@ func (a *Agent) Run(ctx context.Context) error {
 			a.log.Printf("checkin: %v", err)
 			sleepCtx(ctx, a.clock(), 5*time.Second)
 		}
+	}
+	if a.hasLeft.Load() {
+		return nil
 	}
 	return ctx.Err()
 }
@@ -310,6 +328,10 @@ func (a *Agent) reportLoop(ctx context.Context) {
 		}
 		if a.sys.Alive() {
 			if err := a.report(ctx); err != nil && ctx.Err() == nil {
+				if by, ok := endedBy(err); ok {
+					a.enrollmentEnded(by)
+					continue
+				}
 				a.log.Printf("report: %v", err)
 			}
 		}
@@ -824,6 +846,15 @@ func (a *Agent) uploadOnce(ctx context.Context, job, name, path string) error {
 // errRefused is labd turning a request down; trying again won't help.
 var errRefused = errors.New("refused")
 
+// statusError is labd answering with a status other than 200.
+type statusError struct {
+	Code   int
+	Header http.Header
+	msg    string
+}
+
+func (e *statusError) Error() string { return e.msg }
+
 func postJSON(ctx context.Context, c *http.Client, u, secret string, in, out any) error {
 	b, _ := json.Marshal(in)
 	req, _ := http.NewRequestWithContext(ctx, "POST", u, bytes.NewReader(b))
@@ -847,7 +878,7 @@ func doJSON(c *http.Client, req *http.Request, secret string, out any) error {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(body)))
+		return &statusError{Code: resp.StatusCode, Header: resp.Header, msg: fmt.Sprintf("%s: %s", resp.Status, strings.TrimSpace(string(body)))}
 	}
 	if out != nil {
 		return json.Unmarshal(body, out)
