@@ -20,7 +20,7 @@ func openStore(path string) (*store, error) {
 	db.SetMaxOpenConns(1)
 	_, err = db.Exec(`
 CREATE TABLE IF NOT EXISTS devices (id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, secret_hash TEXT NOT NULL, data TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS tokens (token_hash TEXT PRIMARY KEY, name TEXT NOT NULL, label TEXT, model TEXT, expires INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS tokens (token_hash TEXT PRIMARY KEY, name TEXT NOT NULL, label TEXT, model TEXT, expires INTEGER NOT NULL, volunteer TEXT NOT NULL DEFAULT '', contact TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, device TEXT NOT NULL, created INTEGER NOT NULL, state TEXT NOT NULL, data TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS jobs_device ON jobs(device, created);
 CREATE TABLE IF NOT EXISTS builds (id TEXT PRIMARY KEY, key TEXT NOT NULL, created INTEGER NOT NULL, state TEXT NOT NULL, data TEXT NOT NULL);
@@ -30,7 +30,23 @@ CREATE TABLE IF NOT EXISTS configs (device TEXT NOT NULL, kernel TEXT NOT NULL, 
 	if err != nil {
 		return nil, err
 	}
+	// A labd from before Volunteer enrollment has tokens without these.
+	for _, col := range []string{"volunteer", "contact"} {
+		if err := addColumn(db, "tokens", col, "TEXT NOT NULL DEFAULT ''"); err != nil {
+			return nil, err
+		}
+	}
 	return &store{db}, nil
+}
+
+// addColumn adds a column to an existing table unless it is already there.
+func addColumn(db *sql.DB, table, col, def string) error {
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM pragma_table_info(?) WHERE name=?`, table, col).Scan(&n); err != nil || n > 0 {
+		return err
+	}
+	_, err := db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + col + ` ` + def)
+	return err
 }
 
 func (s *store) saveDevice(d *api.Device, secretHash string) error {
@@ -67,7 +83,8 @@ func (s *store) devices() ([]deviceRow, error) {
 }
 
 func (s *store) addToken(hash string, req api.EnrollTokenRequest, exp time.Time) error {
-	_, err := s.db.Exec(`INSERT INTO tokens(token_hash,name,label,model,expires) VALUES(?,?,?,?,?)`, hash, req.Name, req.Label, req.Model, exp.Unix())
+	_, err := s.db.Exec(`INSERT INTO tokens(token_hash,name,label,model,expires,volunteer,contact) VALUES(?,?,?,?,?,?,?)`,
+		hash, req.Name, req.Label, req.Model, exp.Unix(), req.Volunteer, req.Contact)
 	return err
 }
 
@@ -75,7 +92,8 @@ func (s *store) addToken(hash string, req api.EnrollTokenRequest, exp time.Time)
 func (s *store) token(hash string, now time.Time) (*api.EnrollTokenRequest, error) {
 	var r api.EnrollTokenRequest
 	var exp int64
-	err := s.db.QueryRow(`SELECT name,label,model,expires FROM tokens WHERE token_hash=?`, hash).Scan(&r.Name, &r.Label, &r.Model, &exp)
+	err := s.db.QueryRow(`SELECT name,label,model,expires,volunteer,contact FROM tokens WHERE token_hash=?`, hash).
+		Scan(&r.Name, &r.Label, &r.Model, &exp, &r.Volunteer, &r.Contact)
 	if err != nil {
 		return nil, err
 	}

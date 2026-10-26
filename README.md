@@ -141,6 +141,7 @@ sudo ./lab-agent setup --server http://<labd-host>:7770 --token enr_... --gui-us
 - Records the running kernel as known-good.
 - Sets `kernel.panic = 10`.
 - Arms the hardware watchdog (`RuntimeWatchdogSec=30s`).
+- With `--autologin`, logs the GUI user into the desktop on boot; with `--autologin` or `--stay-awake`, turns their idle lock and screensaver off (Lab-owned Macs only).
 - Installs and starts `lab-agent.service`.
 
 Then run the baseline:
@@ -151,6 +152,24 @@ lab crashtest m1air   # optional: deliberate panic, checks it recovers by itself
 ```
 
 No other job runs on a Mac until its baseline passes.
+
+### A Volunteer's Mac
+
+A Mac is Lab-owned or a Volunteer's for as long as it stays enrolled; the
+enrollment token decides which, and changing it means enrolling again.
+
+```sh
+lab enroll ada-mbp --volunteer "Ada Lovelace" --contact ada@example.org
+```
+
+Either flag without the other is refused. labd gives the Mac its own
+unguessable ntfy topic when it enrolls (on the server `--ntfy` posts to), and
+`setup` prints it with a QR code to subscribe from a phone. On a Volunteer's
+Mac `setup` refuses `--autologin` and `--stay-awake`. Setup and every
+check-in report whether `@` can be snapshotted (`/` is the btrfs subvolume
+`@` and snapper has a root config for it); a Mac whose `@` can't is shown as
+not eligible for Installed runs. On the Mac, `sudo lab-agent status` shows
+what it is enrolled as, its topic and its eligibility.
 
 ### Out-of-band control from a macOS host
 

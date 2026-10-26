@@ -17,7 +17,9 @@ import (
 
 const usage = `lab-agent: the Mac side of the test lab
 
-  sudo lab-agent setup --server http://labd:7770 --token enr_... [--gui-user you --autologin]
+  sudo lab-agent setup --server http://labd:7770 --token enr_... [--gui-user you --autologin|--stay-awake]
+                                  (a Volunteer's Mac refuses --autologin and --stay-awake)
+  sudo lab-agent status           what this Mac is enrolled as, its ntfy topic, and Installed-run eligibility
   sudo lab-agent preflight        what makes this Mac unsafe to test on
   sudo lab-agent known-good       the kernel setup would record as known-good (read-only)
   lab-agent run                   the daemon (started by lab-agent.service)
@@ -40,8 +42,9 @@ func main() {
 		token := fs.String("token", "", "one-time enrollment token from `lab enroll`")
 		gui := fs.String("gui-user", "", "user whose Hyprland session GUI tests drive")
 		auto := fs.Bool("autologin", false, "log the GUI user into the desktop on boot and turn idle lock off")
+		stay := fs.Bool("stay-awake", false, "turn the GUI user's idle lock and screensaver off")
 		fs.Parse(os.Args[2:])
-		err = agent.Setup(ctx, agent.SetupOptions{Server: *server, Token: *token, GUIUser: *gui, Autologin: *auto,
+		err = agent.Setup(ctx, agent.SetupOptions{Server: *server, Token: *token, GUIUser: *gui, Autologin: *auto, StayAwake: *stay,
 			Log: func(f string, a ...any) { fmt.Printf("  "+f+"\n", a...) }})
 	case "preflight":
 		l := &agent.Linux{WorkDir: "/var/lib/maclab"}
@@ -83,6 +86,14 @@ func main() {
 	case "version":
 		fmt.Println(agent.Version)
 	default:
+		if agent.IsVolunteerCommand(os.Args[1]) {
+			var cfg *agent.Config
+			if cfg, err = agent.LoadConfig(agent.ConfigPath); err == nil {
+				sys := &agent.Linux{WorkDir: "/var/lib/maclab", GUIUser: cfg.GUIUser}
+				err = agent.Volunteer(ctx, cfg, sys, os.Args[1:], os.Stdout)
+			}
+			break
+		}
 		fmt.Print(usage)
 		os.Exit(2)
 	}

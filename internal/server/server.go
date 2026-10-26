@@ -13,7 +13,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -150,6 +152,9 @@ func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
 	for _, row := range rows {
 		d := row.d
 		d.ActiveJob = ""
+		if d.Kind == "" {
+			d.Kind = api.KindLabOwned // enrolled before Volunteer Macs existed
+		}
 		if d.State == api.StateBusy || d.State == api.StateRecovering {
 			d.State = api.StateOffline
 		}
@@ -377,6 +382,7 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("POST /api/agent/enroll", s.hEnroll)
 	m.HandleFunc("POST /api/agent/checkin", s.agent(s.hCheckin))
 	m.HandleFunc("POST /api/agent/report", s.agent(s.hReport))
+	m.HandleFunc("GET /api/agent/enrollment", s.agent(s.hAgentEnrollment))
 	m.HandleFunc("GET /api/agent/artifacts/{sha}", s.agent(s.hAgentArtifact))
 	m.HandleFunc("POST /api/agent/upload", s.agent(s.hUpload))
 
@@ -485,6 +491,11 @@ func (s *Server) hEnrollToken(w http.ResponseWriter, r *http.Request) {
 	if req.Model == "" {
 		req.Model = api.ModelLaptop
 	}
+	req.Volunteer, req.Contact = strings.TrimSpace(req.Volunteer), strings.TrimSpace(req.Contact)
+	if (req.Volunteer == "") != (req.Contact == "") {
+		httpErr(w, 400, "a Volunteer's token needs both the Volunteer's name and their contact")
+		return
+	}
 	tok := "enr_" + randHex(16)
 	exp := s.now().Add(24 * time.Hour)
 	if err := s.store.addToken(hashSecret(tok), req, exp); err != nil {
@@ -521,6 +532,7 @@ func (s *Server) hEnroll(w http.ResponseWriter, r *http.Request) {
 		if retry {
 			v.enrolledWith = hashSecret(req.Token)
 			v.secretHash = hashSecret(secret)
+			v.d.Enrollment = enrollment(t, v.d.Enrollment)
 			v.saveLocked()
 		}
 		d := v.d
@@ -530,11 +542,11 @@ func (s *Server) hEnroll(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.log.Printf("enrolled %s again before its first check-in", t.Name)
-		writeJSON(w, api.EnrollResponse{DeviceID: d.ID, Name: d.Name, Secret: secret})
+		writeJSON(w, api.EnrollResponse{DeviceID: d.ID, Name: d.Name, Secret: secret, AgentEnrollment: s.agentEnrollment(d.Enrollment)})
 		return
 	}
 	d := api.Device{ID: "d-" + randHex(6), Name: t.Name, Label: t.Label, Model: t.Model, State: api.StateNew,
-		StateReason: "enrolled; run a baseline job", Facts: req.Facts}
+		StateReason: "enrolled; run a baseline job", Facts: req.Facts, Enrollment: enrollment(t, api.Enrollment{})}
 	v := newDev(s, d, hashSecret(secret))
 	v.enrolledWith = hashSecret(req.Token)
 	s.mu.Lock()
@@ -549,8 +561,47 @@ func (s *Server) hEnroll(w http.ResponseWriter, r *http.Request) {
 	v.saveLocked()
 	v.mu.Unlock()
 	go s.deviceLoop(v)
-	s.log.Printf("enrolled %s (%s)", d.Name, req.Facts.DTModel)
-	writeJSON(w, api.EnrollResponse{DeviceID: d.ID, Name: d.Name, Secret: secret})
+	s.log.Printf("enrolled %s (%s, %s)", d.Name, d.Kind, req.Facts.DTModel)
+	writeJSON(w, api.EnrollResponse{DeviceID: d.ID, Name: d.Name, Secret: secret, AgentEnrollment: s.agentEnrollment(d.Enrollment)})
+}
+
+// enrollment is what token t makes a Mac. A Volunteer's Mac enrolled again
+// before its first check-in keeps the topic it was given (old).
+func enrollment(t *api.EnrollTokenRequest, old api.Enrollment) api.Enrollment {
+	if t.Volunteer == "" {
+		return api.Enrollment{Kind: api.KindLabOwned}
+	}
+	e := api.Enrollment{Kind: api.KindVolunteer, Volunteer: t.Volunteer, Contact: t.Contact, NtfyTopic: old.NtfyTopic}
+	if e.NtfyTopic == "" {
+		e.NtfyTopic = newNtfyTopic()
+	}
+	return e
+}
+
+// newNtfyTopic is an unguessable ntfy topic for one Volunteer Mac: about 106
+// random bits, in digits only so that no topic spells a word or a name.
+func newNtfyTopic() string {
+	n, _ := rand.Int(rand.Reader, new(big.Int).Exp(big.NewInt(10), big.NewInt(32), nil))
+	return fmt.Sprintf("maclab-%032d", n)
+}
+
+// agentEnrollment is e as the Mac is told it, with its topic's URL on the
+// lab's ntfy server (the one --ntfy posts to).
+func (s *Server) agentEnrollment(e api.Enrollment) api.AgentEnrollment {
+	ae := api.AgentEnrollment{Enrollment: e}
+	if u, err := url.Parse(s.cfg.NtfyURL); err == nil && e.NtfyTopic != "" && u.Host != "" {
+		ae.NtfyURL = (&url.URL{Scheme: u.Scheme, Host: u.Host, Path: "/" + e.NtfyTopic}).String()
+	}
+	return ae
+}
+
+// hAgentEnrollment tells a Mac what it is enrolled as, for `lab-agent status`.
+func (s *Server) hAgentEnrollment(w http.ResponseWriter, r *http.Request) {
+	v := agentDev(r)
+	v.mu.Lock()
+	e := v.d.Enrollment
+	v.mu.Unlock()
+	writeJSON(w, s.agentEnrollment(e))
 }
 
 func (s *Server) hCheckin(w http.ResponseWriter, r *http.Request) {
