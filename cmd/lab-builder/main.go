@@ -1,6 +1,7 @@
 // Command lab-builder builds kernels for the lab on a controller Mac. Each
-// build runs `kbuild` in an Apple `container` micro-VM; the only state it
-// keeps is one size-capped cache volume.
+// build runs `kbuild` in an Apple `container` micro-VM, or with --runtime
+// docker in a Docker container (Colima, Docker Desktop); the only state it
+// keeps is one cache volume.
 package main
 
 import (
@@ -8,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -34,6 +36,9 @@ type builder struct {
 	cpus, mem           string
 	io                  string
 	githubToken         string // file holding a GitHub token for private repos
+	runtime             string // "container" (Apple container) or "docker"
+	docker              string // the docker CLI
+	dockerContext       string // its --context, if any
 	asUser              *user.User
 	http                *http.Client
 }
@@ -54,7 +59,24 @@ func main() {
 	flag.StringVar(&b.io, "io", "", "scratch dir for inputs and the artifact; emptied after each build (default ~/maclab/io of the container user)")
 	flag.StringVar(&b.githubToken, "github-token-file", "", "GitHub token for cloning private github.com repos (default ~/.config/maclab/github-token of the container user)")
 	as := flag.String("as-user", "", "run container as this user, in their login session. Lets lab-builder run as a root daemon, which macOS Local Network privacy does not block")
+	flag.StringVar(&b.runtime, "runtime", "container", "what runs the builds: container (Apple container) or docker (Colima, Docker Desktop)")
+	flag.StringVar(&b.docker, "docker", "docker", "the docker CLI, with --runtime docker")
+	flag.StringVar(&b.dockerContext, "context", "", "docker context, with --runtime docker (e.g. colima)")
 	flag.Parse()
+	switch b.runtime {
+	case "container":
+		if b.dockerContext != "" {
+			log.Fatal("--context is for --runtime docker")
+		}
+	case "docker":
+		p, err := exec.LookPath(b.docker)
+		if err != nil {
+			log.Fatalf("--runtime docker: %v", err)
+		}
+		b.docker = p
+	default:
+		log.Fatalf("--runtime %q: want container or docker", b.runtime)
+	}
 	if *as != "" {
 		u, err := user.Lookup(*as)
 		if err != nil {
@@ -74,7 +96,7 @@ func main() {
 	b.server = strings.TrimRight(b.server, "/")
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	log.Printf("lab-builder %s: image %s, volume %s, %s cpus, %s", b.host, b.image, b.volume, b.cpus, b.mem)
+	log.Printf("lab-builder %s: %s, image %s, volume %s, %s cpus, %s", b.host, b.runtime, b.image, b.volume, b.cpus, b.mem)
 	kinds := "kernel"
 	if b.pkgImage != "" {
 		kinds += ",package"
@@ -95,13 +117,64 @@ func main() {
 	}
 }
 
-// container runs the container CLI, in the configured user's session if any.
+// container runs the runtime's CLI (container, or docker with its context),
+// in the configured user's session if any.
 func (b *builder) container(ctx context.Context, args ...string) *exec.Cmd {
-	if b.asUser == nil {
-		return exec.CommandContext(ctx, "/usr/local/bin/container", args...)
+	bin := "/usr/local/bin/container"
+	if b.runtime == "docker" {
+		bin = b.docker
+		if b.dockerContext != "" {
+			args = append([]string{"--context", b.dockerContext}, args...)
+		}
 	}
-	full := append([]string{"asuser", b.asUser.Uid, "sudo", "-n", "-u", b.asUser.Username, "/usr/local/bin/container"}, args...)
+	if b.asUser == nil {
+		return exec.CommandContext(ctx, bin, args...)
+	}
+	full := append([]string{"asuser", b.asUser.Uid, "sudo", "-n", "-u", b.asUser.Username, bin}, args...)
 	return exec.CommandContext(ctx, "/bin/launchctl", full...)
+}
+
+// buildVM runs image with the cache volume on /cache and dir as /io, its
+// output to out, and returns kbuild's error. Apple container shares dir
+// itself. Docker (Colima) shares only paths under $HOME into its VM, and a
+// bind mount of anything else is silently empty, so /io is copied in before
+// the build and back out after it.
+func (b *builder) buildVM(ctx context.Context, name, image, volume, dir string, env []string, out io.Writer) error {
+	args := []string{"--name", name, "--cpus", b.cpus, "--memory", b.mem, "-v", volume + ":/cache"}
+	for _, e := range env {
+		args = append(args, "-e", e)
+	}
+	if b.runtime != "docker" {
+		cmd := b.container(ctx, append(append([]string{"run", "--rm"}, args...), "-v", dir+":/io", image)...)
+		return b.stream(cmd, out)
+	}
+	defer b.container(context.Background(), "rm", "--force", name).Run()
+	step := func(what string, args ...string) error {
+		if o, err := b.container(ctx, args...).CombinedOutput(); err != nil {
+			return fmt.Errorf("%s: %v: %s", what, err, strings.TrimSpace(string(o)))
+		}
+		return nil
+	}
+	if err := step("creating the build container", append(append([]string{"create"}, args...), image)...); err != nil {
+		return err
+	}
+	if err := step("copying the inputs in", "cp", dir+"/.", name+":/io"); err != nil {
+		return err
+	}
+	if err := b.stream(b.container(ctx, "start", "--attach", name), out); err != nil {
+		return err
+	}
+	return step("copying the outputs out", "cp", name+":/io/.", dir)
+}
+
+// stream runs cmd with its output to out.
+func (b *builder) stream(cmd *exec.Cmd, out io.Writer) error {
+	cmd.WaitDelay = 10 * time.Second
+	cmd.Stdout, cmd.Stderr = out, out
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("starting the build VM: %w", err)
+	}
+	return cmd.Wait()
 }
 
 func (b *builder) chown(path string) {
@@ -278,20 +351,10 @@ func (b *builder) run(ctx context.Context, a api.BuildAssignment) {
 			}
 		}
 	}
-	args := []string{"run", "--rm", "--name", "maclab-" + bd.ID, "--cpus", b.cpus, "--memory", b.mem,
-		"-v", volume + ":/cache", "-v", dir + ":/io"}
-	for _, e := range env {
-		args = append(args, "-e", e)
-	}
-	cmd := b.container(bctx, append(args, image)...)
-	cmd.WaitDelay = 10 * time.Second
 	pr, pw := io.Pipe()
-	cmd.Stdout, cmd.Stderr = pw, pw
-	if err := cmd.Start(); err != nil {
-		result.Error = "starting the build VM: " + err.Error()
-		return
-	}
+	scanned := make(chan struct{})
 	go func() {
+		defer close(scanned)
 		sc := bufio.NewScanner(pr)
 		sc.Buffer(make([]byte, 1<<20), 1<<20)
 		for sc.Scan() {
@@ -301,17 +364,26 @@ func (b *builder) run(ctx context.Context, a api.BuildAssignment) {
 			}
 			push(l)
 		}
+		io.Copy(io.Discard, pr)
 	}()
-	err := cmd.Wait()
+	err := b.buildVM(bctx, "maclab-"+bd.ID, image, volume, dir, env, pw)
 	pw.Close()
+	<-scanned
 	if bctx.Err() != nil {
-		b.container(context.Background(), "stop", "maclab-"+bd.ID).Run()
-		b.container(context.Background(), "delete", "--force", "maclab-"+bd.ID).Run()
+		if b.runtime == "docker" {
+			b.container(context.Background(), "rm", "--force", "maclab-"+bd.ID).Run()
+		} else {
+			b.container(context.Background(), "stop", "maclab-"+bd.ID).Run()
+			b.container(context.Background(), "delete", "--force", "maclab-"+bd.ID).Run()
+		}
 		result.Error = "canceled"
 		return
 	}
 	if err != nil {
-		result.Error = "kbuild: " + err.Error()
+		if errors.As(err, new(*exec.ExitError)) {
+			err = fmt.Errorf("kbuild: %w", err)
+		}
+		result.Error = err.Error()
 		return
 	}
 	rel, _ := os.ReadFile(filepath.Join(dir, "release"))
