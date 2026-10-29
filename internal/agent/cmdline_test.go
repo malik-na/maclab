@@ -79,3 +79,18 @@ func TestRecordable(t *testing.T) {
 		}
 	}
 }
+
+// josip-omarchy's systemd 262 refused the dashed boot ID, so labd saw none of
+// a lost Lab boot's journal and blamed the one-shot.
+func TestJournalBootTakesTheBootIDWithoutDashes(t *testing.T) {
+	for in, want := range map[string]string{
+		"a3d77c4a-6e45-49c1-a91e-72a6e4cd42ce": "a3d77c4a6e4549c1a91e72a6e4cd42ce",
+		"a3d77c4a6e4549c1a91e72a6e4cd42ce":     "a3d77c4a6e4549c1a91e72a6e4cd42ce",
+		"0":                                    "0",
+		"-1":                                   "-1",
+	} {
+		if got := journalBoot(in); got != want {
+			t.Errorf("journalBoot(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

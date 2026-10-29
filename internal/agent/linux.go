@@ -276,6 +276,7 @@ func (l *Linux) Collect(ctx context.Context, boot, outDir string) error {
 		out, err := exec.CommandContext(ctx, "journalctl", args...).CombinedOutput()
 		save(name, out, err, "journalctl")
 	}
+	boot = journalBoot(boot)
 	run("journal.txt", "-b", boot, "-o", "short-monotonic", "--no-pager")
 	run("kernel.txt", "-k", "-b", boot, "-o", "short-monotonic", "--no-pager")
 	run("dmesg-errors.txt", "-k", "-b", boot, "-p", "warning", "-o", "cat", "--no-pager")
@@ -322,6 +323,16 @@ func dashedID(id string) string {
 		return id
 	}
 	return id[:8] + "-" + id[8:12] + "-" + id[12:16] + "-" + id[16:20] + "-" + id[20:]
+}
+
+// journalBoot writes a boot for journalctl -b: a boot ID as 32 hex digits,
+// which every systemd takes. systemd 262 refuses the dashed form that
+// boot.json and PreviousBoot hold, so a lost boot's journal came back empty.
+func journalBoot(boot string) string {
+	if len(boot) == 36 && strings.Count(boot, "-") == 4 {
+		return strings.ReplaceAll(boot, "-", "")
+	}
+	return boot
 }
 
 // pstoreArchive is where systemd-pstore moves records out of /sys/fs/pstore
