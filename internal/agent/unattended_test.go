@@ -305,6 +305,39 @@ func TestUnattendedJournal(t *testing.T) {
 	}
 }
 
+// A tailscaled started by hand but not enabled is a warning: after a reboot
+// the Mac is off the tailnet. One not running at all, or enabled, is not.
+func TestUnattendedTailscale(t *testing.T) {
+	const sock = "run/tailscale/tailscaled.sock"
+	for _, c := range []struct {
+		name  string
+		files map[string]string
+		want  bool
+	}{
+		{"no tailscaled", nil, false},
+		{"enabled but not running", map[string]string{"etc/systemd/system/multi-user.target.wants/tailscaled.service": ""}, false},
+		{"running, not enabled (josip-omarchy)", map[string]string{sock: ""}, true},
+		{"running and enabled", map[string]string{sock: "", "etc/systemd/system/multi-user.target.wants/tailscaled.service": ""}, false},
+		{"running, wanted by a vendor unit", map[string]string{sock: "", "usr/lib/systemd/system/network-online.target.wants/tailscaled.service": ""}, false},
+	} {
+		files := m1airRoot()
+		for p, b := range c.files {
+			files[p] = b
+		}
+		root := fakeRoot(t, files)
+		hard, warnings := unattendedProblems(root, m1airLimine(root), m1airRootSource, m1airRootSource)
+		if len(hard) > 0 {
+			t.Errorf("%s: hard %q", c.name, hard)
+		}
+		switch {
+		case !c.want && len(warnings) > 0:
+			t.Errorf("%s: %q", c.name, warnings)
+		case c.want && (len(warnings) != 1 || !strings.Contains(warnings[0], "systemctl enable tailscaled")):
+			t.Errorf("%s: %q, want the tailscaled warning", c.name, warnings)
+		}
+	}
+}
+
 func TestPersistJournal(t *testing.T) {
 	const runtime = "run/log/journal/873f3249bd1a4ef38712b0fa73800436/system.journal"
 	volatile := func() map[string]string {

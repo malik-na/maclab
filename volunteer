@@ -72,7 +72,9 @@ Enter your password to go ahead, or press Ctrl-C to stop."
 		say "Installing Tailscale, which connects this Mac to the lab..."
 		sudo pacman -S --needed --noconfirm tailscale
 	fi
-	if ! systemctl is-active --quiet tailscaled.service; then
+	# Enabled as well as running: a Tailscale started by hand doesn't come
+	# back after a reboot, and the lab reaches this Mac only over it.
+	if ! systemctl is-enabled --quiet tailscaled.service || ! systemctl is-active --quiet tailscaled.service; then
 		out=$(sudo systemctl enable --now tailscaled.service 2>&1) || die "Tailscale didn't start: $out"
 	fi
 	if [[ $(tailscale status --json 2>/dev/null | jq -r .BackendState) != Running ]]; then

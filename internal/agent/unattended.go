@@ -34,7 +34,26 @@ func unattendedProblems(root string, b bootloader, rootSource, bootSource string
 		warnings = append(warnings, "the journal is not kept across reboots ("+why+"): a lab boot that fails takes its journal with it, "+
 			"so labd collects no logs from it. lab-agent setup keeps it on disk unless given --volatile-journal")
 	}
+	if tailscaleNotEnabled(root) {
+		warnings = append(warnings, "tailscaled is running but not enabled: after any reboot, a lab boot included, this Mac stays off "+
+			"the tailnet until someone starts Tailscale by hand, and labd can't reach it. Run sudo systemctl enable tailscaled")
+	}
 	return hard, warnings
+}
+
+// tailscaleNotEnabled says whether tailscaled runs now (its socket is there)
+// with no unit wanting it at boot: started by hand, it won't come back after
+// a reboot.
+func tailscaleNotEnabled(root string) bool {
+	if _, err := os.Stat(filepath.Join(root, "run/tailscale/tailscaled.sock")); err != nil {
+		return false
+	}
+	for _, d := range []string{"etc", "usr/lib"} {
+		if wants, _ := filepath.Glob(filepath.Join(root, d, "systemd/system/*.wants/tailscaled.service")); len(wants) > 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // cryptVolume is an encrypted volume the boot unlocks, as one place sets it up.
