@@ -1,7 +1,9 @@
 package agent
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -203,7 +205,10 @@ func lockSession(user string, say func(string, ...any)) error {
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command("runuser", append([]string{"-u", u.Username, "--", "env"}, append(genv, argv...)...)...)
+	asUser := func(argv ...string) *exec.Cmd {
+		return exec.Command("runuser", append([]string{"-u", u.Username, "--", "env"}, append(genv, argv...)...)...)
+	}
+	cmd := asUser(argv...)
 	if err := cmd.Start(); err != nil {
 		return err
 	}
@@ -211,13 +216,92 @@ func lockSession(user string, say func(string, ...any)) error {
 	go func() { exited <- cmd.Wait() }()
 	select {
 	case err := <-exited:
-		return fmt.Errorf("%s exited at once: %v", argv[0], err)
+		// Omarchy 4.5's omarchy-system-lock asks omarchy-shell for the lock and
+		// returns, 0 even when the shell didn't take the request.
+		if _, shell := exec.LookPath("omarchy-shell"); err != nil || shell != nil {
+			return fmt.Errorf("%s exited at once: %v", argv[0], err)
+		}
+		sh := shellLock{
+			Status: func() ([]byte, error) { return asUser("omarchy-shell", "lock", "status").Output() },
+			Lock:   func() error { return asUser(argv...).Run() },
+		}
+		if err := sh.await(shellLockWait, 2*time.Second); err != nil {
+			return err
+		}
+		say("locked %s's session with %s (omarchy-shell)", u.Username, argv[0])
+		os.WriteFile(labBootLockedPath, []byte("locked"), 0o644)
+		sh.awaitUnlock(10 * time.Second)
+		return nil
 	case <-time.After(lockHoldTime):
 	}
 	say("locked %s's session with %s", u.Username, argv[0])
 	os.WriteFile(labBootLockedPath, []byte("locked"), 0o644)
 	<-exited // the lock stays up until the Volunteer unlocks
 	return nil
+}
+
+// shellLockWait bounds how long omarchy-shell has to come up and lock: it
+// starts after the compositor, so the first requests can go unanswered.
+const shellLockWait = 90 * time.Second
+
+// shellLock is a lock held by omarchy-shell rather than by a lock process.
+type shellLock struct {
+	Status func() ([]byte, error) // omarchy-shell lock status
+	Lock   func() error           // asks for the lock again
+}
+
+// shellLockStatus is the part of omarchy-shell's lock status the lab reads.
+// Secure means the compositor confirmed the session lock: only then is the
+// screen covered.
+type shellLockStatus struct {
+	Locked    bool `json:"locked"`
+	Requested bool `json:"requested"`
+	Secure    bool `json:"secure"`
+}
+
+func (s shellLock) status() (shellLockStatus, error) {
+	var st shellLockStatus
+	out, err := s.Status()
+	if err != nil {
+		return st, err
+	}
+	return st, json.Unmarshal(bytes.TrimSpace(out), &st)
+}
+
+// await returns once the lock is secure, asking for it again while the shell
+// has no request (it wasn't up yet), or an error after wait.
+func (s shellLock) await(wait, poll time.Duration) error {
+	deadline := time.Now().Add(wait)
+	var last error
+	for {
+		st, err := s.status()
+		switch {
+		case err == nil && st.Secure:
+			return nil
+		case err == nil && !st.Requested:
+			last = errors.New("omarchy-shell has no lock request")
+			s.Lock()
+		case err == nil:
+			last = errors.New("omarchy-shell's lock is not secure yet")
+		default:
+			last = err
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("omarchy-shell did not lock the session in %s: %v", wait, last)
+		}
+		time.Sleep(poll)
+	}
+}
+
+// awaitUnlock returns once the Volunteer has unlocked. A shell that stops
+// answering leaves the compositor's lock up, so it counts as locked.
+func (s shellLock) awaitUnlock(poll time.Duration) {
+	for {
+		if st, err := s.status(); err == nil && !st.Locked {
+			return
+		}
+		time.Sleep(poll)
+	}
 }
 
 // labBootLockWait bounds how long a job's tests wait for the lock.

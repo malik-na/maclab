@@ -1,10 +1,13 @@
 package agent
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/iconidentify/maclab/internal/api"
 )
@@ -185,5 +188,92 @@ func TestLockFallsBackToHyprlockOnOlderOmarchy(t *testing.T) {
 func TestNoLockCommandMeansNoLockCommand(t *testing.T) {
 	if argv, ok := lockCommand(func(string) bool { return false }); ok {
 		t.Errorf("lock command %v with neither lock installed", argv)
+	}
+}
+
+// fakeShell answers omarchy-shell lock status from a script of states.
+type fakeShell struct {
+	states   []string
+	requests int
+}
+
+func (f *fakeShell) lock() shellLock {
+	return shellLock{
+		Status: func() ([]byte, error) {
+			if len(f.states) == 0 {
+				return nil, errors.New("no shell")
+			}
+			s := f.states[0]
+			if len(f.states) > 1 {
+				f.states = f.states[1:]
+			}
+			if s == "down" {
+				return []byte("OMARCHY_PATH is not set\n"), errors.New("exit status 1")
+			}
+			return []byte(s + "\n"), nil
+		},
+		Lock: func() error { f.requests++; return nil },
+	}
+}
+
+// Omarchy 4.5's omarchy-system-lock returns at once; on josip-omarchy the lab
+// took that for a failed lock and ended the session.
+func TestShellLockCountsOnlyOnceTheCompositorConfirmsIt(t *testing.T) {
+	f := &fakeShell{states: []string{
+		"down", // the shell isn't up yet
+		`{"locked":false,"requested":false,"secure":false}`,
+		`{"locked":true,"requested":true,"secure":false}`,
+		`{"locked":true,"requested":true,"secure":true}`,
+	}}
+	if err := f.lock().await(time.Second, time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	if f.requests != 1 {
+		t.Errorf("asked for the lock %d times, want once: when the shell was up with no request", f.requests)
+	}
+}
+
+func TestShellLockThatNeverSecuresFails(t *testing.T) {
+	for name, state := range map[string]string{
+		"requested, never secure": `{"locked":true,"requested":true,"secure":false}`,
+		"shell never answers":     "down",
+	} {
+		f := &fakeShell{states: []string{state}}
+		if err := f.lock().await(20*time.Millisecond, time.Millisecond); err == nil {
+			t.Errorf("%s: counted as locked", name)
+		}
+	}
+}
+
+func TestShellLockWaitsForTheVolunteerToUnlock(t *testing.T) {
+	f := &fakeShell{states: []string{
+		`{"locked":true,"requested":true,"secure":true}`,
+		"down", // the shell restarted: the compositor's lock is still up
+		`{"locked":false,"requested":false,"secure":false}`,
+	}}
+	done := make(chan struct{})
+	go func() { f.lock().awaitUnlock(time.Millisecond); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("still waiting after the Volunteer unlocked")
+	}
+}
+
+func TestOmarchyPathComesFromTheUsersCompositor(t *testing.T) {
+	uid := fmt.Sprint(os.Getuid())
+	proc := fakeRoot(t, map[string]string{
+		"1/comm":       "systemd\n",
+		"1/environ":    "OMARCHY_PATH=/wrong\x00",
+		"42/comm":      "Hyprland\n",
+		"42/environ":   "HOME=/home/ada\x00OMARCHY_PATH=/usr/share/omarchy\x00",
+		"self/comm":    "Hyprland\n",
+		"self/environ": "OMARCHY_PATH=/not-a-pid\x00",
+	})
+	if got := compositorVar(proc, uid, "OMARCHY_PATH"); got != "/usr/share/omarchy" {
+		t.Errorf("OMARCHY_PATH = %q, want Hyprland's /usr/share/omarchy", got)
+	}
+	if got := compositorVar(proc, uid+"0", "OMARCHY_PATH"); got != "" {
+		t.Errorf("another user's compositor gave %q", got)
 	}
 }

@@ -415,6 +415,10 @@ func guiEnv(name string, wait time.Duration) (*user.User, []string, error) {
 			if sigs, _ := filepath.Glob(filepath.Join(run, "hypr", "*")); len(sigs) > 0 {
 				env = append(env, "HYPRLAND_INSTANCE_SIGNATURE="+filepath.Base(sigs[len(sigs)-1]))
 			}
+			// omarchy-shell, and so Omarchy's lock, refuses to run without it.
+			if p := compositorVar("/proc", u.Uid, "OMARCHY_PATH"); p != "" {
+				env = append(env, "OMARCHY_PATH="+p)
+			}
 			return u, env, nil
 		}
 		if time.Now().After(deadline) {
@@ -422,6 +426,28 @@ func guiEnv(name string, wait time.Duration) (*user.User, []string, error) {
 		}
 		time.Sleep(2 * time.Second)
 	}
+}
+
+// compositorVar is name's value in the environment of uid's Hyprland, which
+// has the session's variables (uwsm's env.d) that the lab's runuser lacks.
+func compositorVar(proc, uid, name string) string {
+	dirs, _ := os.ReadDir(proc)
+	for _, d := range dirs {
+		pid := filepath.Join(proc, d.Name())
+		if _, err := strconv.Atoi(d.Name()); err != nil || readTrim(filepath.Join(pid, "comm")) != "Hyprland" {
+			continue
+		}
+		if st, err := os.Stat(pid); err != nil || fmt.Sprint(st.Sys().(*syscall.Stat_t).Uid) != uid {
+			continue
+		}
+		b, _ := os.ReadFile(filepath.Join(pid, "environ"))
+		for _, kv := range strings.Split(string(b), "\x00") {
+			if v, ok := strings.CutPrefix(kv, name+"="); ok {
+				return v
+			}
+		}
+	}
+	return ""
 }
 
 // Screenshot captures what the panel shows. It reads the display
