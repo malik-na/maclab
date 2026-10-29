@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -91,6 +93,74 @@ func TestEncryptedMacKeepsOmarchysOwnAutologin(t *testing.T) {
 func TestLabOwnedMacNeedsNoDropInBecauseItKeepsPermanentAutologin(t *testing.T) {
 	if d, ok := labBootAutologin(labBootLine(), api.KindLabOwned, "ada", false); ok {
 		t.Errorf("drop-in on a Lab-owned Mac: %+v", d)
+	}
+}
+
+// SDDM 0.21 reads only /etc/sddm.conf(.d) and /usr/lib/sddm/sddm.conf.d: on
+// josip-omarchy it ignored the drop-in under /run and showed its greeter.
+func TestSDDMsCopyIsWhereSDDMReadsAfterOmarchysOwn(t *testing.T) {
+	if filepath.Dir(labBootSDDMPath) != "/etc/sddm.conf.d" {
+		t.Errorf("SDDM's copy %s is not in /etc/sddm.conf.d", labBootSDDMPath)
+	}
+	if filepath.Base(labBootSDDMPath) <= "99-omarchy-login.conf" {
+		t.Errorf("%s sorts before Omarchy's 99-omarchy-login.conf, which would override it", labBootSDDMPath)
+	}
+}
+
+func quiet(string, ...any) {}
+
+func TestLabBootWritesTheDropInAndSDDMsCopy(t *testing.T) {
+	root := t.TempDir()
+	if err := placeLabBootAutologin(root, labBootLine(), api.KindVolunteer, "ada", func() bool { return false }, quiet); err != nil {
+		t.Fatal(err)
+	}
+	run, err := os.ReadFile(filepath.Join(root, labBootAutologinPath))
+	if err != nil {
+		t.Fatalf("no drop-in under /run: %v", err)
+	}
+	etc, err := os.ReadFile(filepath.Join(root, labBootSDDMPath))
+	if err != nil {
+		t.Fatalf("no copy for SDDM: %v", err)
+	}
+	if string(etc) != string(run) || !strings.Contains(string(etc), "User=ada") {
+		t.Errorf("SDDM's copy:\n%s\nthe drop-in:\n%s", etc, run)
+	}
+}
+
+// A Lab boot that went down before its session came up leaves SDDM's copy.
+// Any later boot removes it before SDDM starts, and only it.
+func TestEveryBootRemovesALeftoverCopyBeforeSDDM(t *testing.T) {
+	for name, c := range map[string]struct {
+		cmdline   string
+		encrypted bool
+	}{
+		"the Volunteer's own boot":    {lockScreenBase, false},
+		"an encrypted Mac's Lab boot": {labBootLine(), true},
+	} {
+		root := fakeRoot(t, map[string]string{
+			labBootSDDMPath[1:]:                        "[Autologin]\nUser=ada\n",
+			"etc/sddm.conf.d/99-omarchy-login.conf":    "[Users]\nRememberLastUser=true\n",
+			"etc/sddm.conf.d/zz-maclab-autologin.conf": "[Autologin]\nUser=lab\n",
+		})
+		encrypted := func() bool {
+			if !IsLabBoot(c.cmdline) {
+				t.Errorf("%s: asked whether the disk is encrypted on a boot that is not a Lab boot", name)
+			}
+			return c.encrypted
+		}
+		if err := placeLabBootAutologin(root, c.cmdline, api.KindVolunteer, "ada", encrypted, quiet); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		for _, p := range []string{labBootSDDMPath, labBootAutologinPath} {
+			if _, err := os.Stat(filepath.Join(root, p)); err == nil {
+				t.Errorf("%s: %s is there", name, p)
+			}
+		}
+		for _, p := range []string{"etc/sddm.conf.d/99-omarchy-login.conf", "etc/sddm.conf.d/zz-maclab-autologin.conf"} {
+			if _, err := os.Stat(filepath.Join(root, p)); err != nil {
+				t.Errorf("%s: %s, not the lab boot's, was removed", name, p)
+			}
+		}
 	}
 }
 

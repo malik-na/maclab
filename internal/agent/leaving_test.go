@@ -202,7 +202,7 @@ func TestDefaultLayoutNamesEverythingSetupWrites(t *testing.T) {
 			t.Errorf("unit %s is not in the default layout: %v", u, l.UnitNames)
 		}
 	}
-	for _, f := range []string{labBootAutologinPath, sysctlPath, watchdogCfg} {
+	for _, f := range []string{labBootAutologinPath, labBootSDDMPath, sysctlPath, watchdogCfg} {
 		if !slices.Contains(l.DropIns, f) {
 			t.Errorf("%s is not in the default layout: %v", f, l.DropIns)
 		}

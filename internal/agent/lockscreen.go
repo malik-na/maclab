@@ -2,7 +2,9 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,8 +17,11 @@ import (
 // A Volunteer's Mac never loses its lock screen to the lab. Tests need a
 // logged-in Wayland session for the GUI user, not an unlocked screen, so a
 // Lab boot logs the GUI user in and locks the session at once. The autologin
-// is decided per boot from the command line and lives under /run, so any boot
-// of the Volunteer's own entry (a deadline fallback, a power cut) can't have it.
+// is decided per boot from the command line and recorded under /run. SDDM
+// reads only /etc/sddm.conf(.d) and /usr/lib/sddm/sddm.conf.d, so a copy goes
+// in /etc/sddm.conf.d for SDDM to read, and is removed once the session is up
+// and before SDDM starts on every boot: any boot of the Volunteer's own entry
+// (a deadline fallback, a power cut) can't have it.
 
 // AutologinDropIn is the SDDM drop-in a Lab boot gets.
 type AutologinDropIn struct {
@@ -25,6 +30,10 @@ type AutologinDropIn struct {
 }
 
 const labBootAutologinPath = "/run/sddm.conf.d/zz-maclab-lab-boot-autologin.conf"
+
+// labBootSDDMPath is the copy of the drop-in that SDDM reads. It sorts after
+// Omarchy's own 99-omarchy-login.conf.
+const labBootSDDMPath = "/etc/sddm.conf.d/zz-maclab-lab-boot-autologin.conf"
 
 // labBootAutologin is the drop-in a boot needs, if any: only a Lab boot of a
 // Volunteer's unencrypted Mac with a GUI user. A Lab-owned Mac keeps its
@@ -112,29 +121,46 @@ func rootEncrypted() bool {
 	return err != nil || strings.Contains(string(out), "crypt")
 }
 
-// WriteLabBootAutologin is the unit before SDDM: on a Lab boot of a
-// Volunteer's Mac it writes the autologin drop-in under /run.
+// WriteLabBootAutologin is the unit before SDDM, on every boot: it removes a
+// copy for SDDM that an earlier Lab boot left, and on a Lab boot of a
+// Volunteer's Mac writes the autologin drop-in under /run and its copy for SDDM.
 func WriteLabBootAutologin(cfg *Config, say func(string, ...any)) error {
 	b, err := os.ReadFile("/proc/cmdline")
 	if err != nil {
 		return err
 	}
-	cmdline := string(b)
+	return placeLabBootAutologin("/", string(b), cfg.Enrollment.Kind, cfg.GUIUser, rootEncrypted, say)
+}
+
+// placeLabBootAutologin is WriteLabBootAutologin under root ("/" except in
+// tests). encrypted is asked only on a Lab boot.
+func placeLabBootAutologin(root, cmdline, kind, guiUser string, encrypted func() bool, say func(string, ...any)) error {
+	// A Lab boot that went down before its session came up leaves its copy;
+	// it must not log the Volunteer in on this boot unless this is a Lab boot.
+	switch err := os.Remove(filepath.Join(root, labBootSDDMPath)); {
+	case err == nil:
+		say("removed %s, left by an earlier Lab boot", labBootSDDMPath)
+	case !errors.Is(err, fs.ErrNotExist):
+		return err
+	}
 	if !IsLabBoot(cmdline) {
 		return nil
 	}
-	d, ok := labBootAutologin(cmdline, cfg.Enrollment.Kind, cfg.GUIUser, rootEncrypted())
+	d, ok := labBootAutologin(cmdline, kind, guiUser, encrypted())
 	if !ok {
 		say("Lab boot with no autologin drop-in (no GUI user, or an encrypted Mac keeping Omarchy's own)")
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(d.Path), 0o755); err != nil {
-		return err
+	for _, p := range []string{d.Path, labBootSDDMPath} {
+		full := filepath.Join(root, p)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(full, []byte(d.Content), 0o644); err != nil {
+			return err
+		}
 	}
-	if err := os.WriteFile(d.Path, []byte(d.Content), 0o644); err != nil {
-		return err
-	}
-	say("Lab boot: %s logs in as %s, locked at once", d.Path, cfg.GUIUser)
+	say("Lab boot: %s logs in as %s, locked at once", labBootSDDMPath, guiUser)
 	return nil
 }
 
@@ -157,6 +183,7 @@ func LockLabBootSession(cfg *Config, say func(string, ...any)) error {
 	if err == nil {
 		return nil // the lock was lifted by the Volunteer
 	}
+	os.Remove(labBootSDDMPath) // gone already if the session came up
 	say("%v: terminating the session", err)
 	os.WriteFile(labBootLockedPath, []byte("failed: "+err.Error()), 0o644)
 	exec.Command("loginctl", "terminate-user", cfg.GUIUser).Run()
@@ -171,6 +198,8 @@ func lockSession(user string, say func(string, ...any)) error {
 		return fmt.Errorf("neither omarchy-system-lock nor hyprlock is installed")
 	}
 	u, genv, err := guiEnv(user, 2*time.Minute)
+	// SDDM has logged the session in, or won't on this boot: its copy goes now.
+	os.Remove(labBootSDDMPath)
 	if err != nil {
 		return err
 	}

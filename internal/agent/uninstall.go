@@ -366,6 +366,10 @@ func (u *uninstaller) uninstall() error {
 		u.watchdog,
 		u.journald,
 		u.serialGetty,
+		// before autologin, which removes /etc/sddm.conf.d once it is empty
+		func() error {
+			return u.remove(u.path(labBootSDDMPath), " (a Lab boot's autologin, left by one that went down)")
+		},
 		u.autologin,
 		func() error { return u.remove(u.path(filepath.Dir(ConfigPath)), " (the device secret)") },
 		func() error { return u.remove(u.path(binPath+".new"), "") },

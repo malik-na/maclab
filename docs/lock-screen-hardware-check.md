@@ -21,7 +21,18 @@ ls /etc/sddm.conf.d /run/sddm.conf.d                       # no maclab autologin
 ## 2. The Volunteer's own boot cannot autologin
 
 Reboot into the Mac's default entry. Expect the SDDM password greeter.
-`/run/sddm.conf.d/zz-maclab-lab-boot-autologin.conf` does not exist.
+Neither `/run/sddm.conf.d/zz-maclab-lab-boot-autologin.conf` nor
+`/etc/sddm.conf.d/zz-maclab-lab-boot-autologin.conf` exists.
+
+To check that a copy left by a Lab boot can't log this boot in, put one in
+place and reboot into the default entry again:
+
+```sh
+printf '[Autologin]\nUser=<gui-user>\nSession=hyprland-uwsm.desktop\n' | sudo tee /etc/sddm.conf.d/zz-maclab-lab-boot-autologin.conf
+```
+
+Expect the password greeter, the file gone, and
+`journalctl -b -u maclab-lab-boot-session` saying it removed it.
 
 ## 3. A Lab boot logs in, locked
 
@@ -35,7 +46,9 @@ Expect, on the screen:
   (Omarchy's `omarchy-system-lock`, else hyprlock) is up within seconds, before
   the desktop is usable.
 - `/run/sddm.conf.d/zz-maclab-lab-boot-autologin.conf` exists, with
-  `User=<gui-user>`.
+  `User=<gui-user>`. SDDM reads only `/etc/sddm.conf(.d)` and
+  `/usr/lib/sddm/sddm.conf.d`, so it logs in from the copy in
+  `/etc/sddm.conf.d/`, which is gone once the session is up.
 - The job passes, and its omarchy-m-test report has no `video` section checks
   (`omarchy-m-test --skip video` ran), neither in the baseline nor the test run.
 - The tests start only once the lock is up: `/run/maclab-lab-boot-lock`
@@ -43,8 +56,8 @@ Expect, on the screen:
 - The lock screen is still up when the job ends; the Volunteer's password
   unlocks it.
 
-If SDDM ignores the drop-in under `/run`, the unit's path is wrong for this
-SDDM: note the config directories `sddm --example-config` lists.
+If the password greeter comes up instead, SDDM didn't read the copy: note the
+config directories `strings /usr/bin/sddm | grep sddm.conf` lists.
 
 Then make the lock fail (`sudo chmod -x $(command -v omarchy-system-lock hyprlock)`)
 and run a job again. Expect the session to be terminated, the job to fail
@@ -54,7 +67,7 @@ on an unlocked session. Restore the execute bits.
 ## 4. Back on the Volunteer's own boot
 
 After the job, the Mac reboots to its known-good kernel. Expect the password
-greeter again, and no drop-in under `/run`.
+greeter again, no drop-in under `/run` and no copy in `/etc/sddm.conf.d/`.
 
 ## 5. An encrypted Mac keeps Omarchy's autologin
 
@@ -72,3 +85,11 @@ on-screen checks.
 
 Record per Mac model: Omarchy and SDDM versions, which lock command was used,
 and each step's outcome.
+
+- 2026-10-29, josip-omarchy (J514S, MacBook Pro 14" M3 Pro), SDDM 0.21.0-7,
+  lab-agent 0.8.0 (drop-in under `/run` only): step 3 failed. The unit wrote
+  the drop-in at 3.4 s and SDDM started at 3.9 s, but showed its password
+  greeter; both tests ended "no Wayland session for josip after 2m0s". SDDM
+  0.21's binary names only `/etc/sddm.conf`, `/etc/sddm.conf.d` and
+  `/usr/lib/sddm/sddm.conf.d`. Fixed by the copy in `/etc/sddm.conf.d/`; not
+  yet rerun.

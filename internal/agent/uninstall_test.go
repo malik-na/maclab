@@ -173,6 +173,19 @@ func TestUninstallLimine(t *testing.T) {
 	}
 }
 
+// A Lab boot that went down before its session came up leaves SDDM's copy of
+// its autologin; uninstall removes it with the rest.
+func TestUninstallRemovesALabBootsLeftoverAutologin(t *testing.T) {
+	m := newLabMac(t)
+	if err := os.WriteFile(m.u.path(labBootSDDMPath), []byte("[Autologin]\nUser=alice\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.u.uninstall(); err != nil {
+		t.Fatal(err)
+	}
+	m.gone(t, labBootSDDMPath, filepath.Dir(labBootSDDMPath))
+}
+
 // A dry run changes nothing and prints exactly the actions the real run takes.
 func TestUninstallDryRun(t *testing.T) {
 	m := newLabMac(t)
