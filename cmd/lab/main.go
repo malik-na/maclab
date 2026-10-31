@@ -57,6 +57,8 @@ const usage = `lab: run kernels and tests on Omarchy Macs
   lab retry <job> [--no-wait]         run a finished job again: same Mac, kernel (or source commit), tests and cmdline
   lab publish <job>                   upload a known-good run's omarchy-m-test report to omarchy-m-testing.org
   lab lease <device> [--ttl 1h] | lab release <device>
+                                      reserve a Mac: until the lease ends only your jobs run on it,
+                                      and others' queued jobs wait. Only you can release it
   lab forget <device> [--force]       take a Mac out of the lab (after lab-agent uninstall); its jobs stay.
                                       Refused while someone else leases it or its agent checks in, unless --force
   lab installed freeze-manifest --release R <manifest.json> <payload.sha256> [--approved-by a,b]
@@ -637,7 +639,7 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 		if err != nil {
 			return err
 		}
-		fmt.Printf("%s leased by %s until %s\n", pos[0], l.Holder, l.Expires.Format(time.TimeOnly))
+		fmt.Printf("%s leased by %s until %s\n", pos[0], l.Who(), l.Expires.Format(time.TimeOnly))
 		return nil
 
 	case "forget":
@@ -997,7 +999,7 @@ func showDevices(ctx context.Context, c *client.Client) error {
 	for _, d := range devs {
 		lease := ""
 		if d.Lease != nil {
-			lease = d.Lease.Holder
+			lease = d.Lease.Who()
 		}
 		fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\t%s\n", d.Name, d.State, d.Tier, d.Kernel, ago(d.LastSeen), d.ActiveJob, lease)
 	}
@@ -1043,7 +1045,7 @@ func showDevice(ctx context.Context, c *client.Client, name string) error {
 		fmt.Printf("  oob:         %s\n", d.OOB.URL)
 	}
 	if d.Lease != nil {
-		fmt.Printf("  lease:       %s until %s\n", d.Lease.Holder, d.Lease.Expires.Format(time.TimeOnly))
+		fmt.Printf("  lease:       %s until %s\n", d.Lease.Who(), d.Lease.Expires.Format(time.TimeOnly))
 	}
 	if d.ActiveJob != "" {
 		fmt.Printf("  job:         %s (%d queued)\n", d.ActiveJob, d.Queued)
