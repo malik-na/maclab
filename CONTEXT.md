@@ -116,5 +116,15 @@ How a run's kernel was started: a cold boot through the Mac's firmware, or kexec
 Returning a Volunteer's Mac to its system exactly as it was just before an Installed run.
 _Avoid_: Restore, revert
 
+**Trial system**:
+A writable btrfs snapshot of a Mac's own system (`@`, and the other subvolumes it mounts but `/var/log`) that one job's Lab boot runs from, so a test may change packages, pacman.conf, `/etc` and the boot setup. The own system is never mounted for the test, only lab-agent's state (`/var/lib/maclab`) is shared; the Lab boot's end boots the own system as it was, and cleanup deletes the snapshot.
+_Avoid_: Sandbox, overlay, rollback (nothing is rolled back: the own system was never written)
+
+**Trial run**:
+A job whose tests run in a Trial system: a userspace PR's run, or `--trial` scripts. labd fingerprints the own system before it and once the Mac is back; a difference fails the job and takes the Mac out of the pool.
+
+**PR run**:
+A job that tests a pull request, branch or commit of any repository (`--pr`). labd pins it to a commit and decides by its tree: a Linux kernel tree is built and booted as a source kernel; anything else is a Trial run with the tree in `$MACLAB_PR_DIR`.
+
 **Promotion**:
 Making an accepted installed run a Mac's new references and Known-good kernel. Volunteer Macs are never promoted.

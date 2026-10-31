@@ -81,4 +81,10 @@ type System interface {
 
 	// SnapshotEligible is nil when @ can be snapshotted, else why not.
 	SnapshotEligible() error
+
+	// RunningTrial is the job whose Trial system this boot runs from, "" on
+	// any other boot.
+	RunningTrial() string
+	// OwnSystem fingerprints the Mac's own system; it refuses on a Lab boot.
+	OwnSystem() (api.OwnSystem, error)
 }

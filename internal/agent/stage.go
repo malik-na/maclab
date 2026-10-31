@@ -47,6 +47,14 @@ func (l *Linux) Stage(ctx context.Context, job string, a api.StageArgs, fetch Fe
 	if err := os.MkdirAll(bootDir, 0o755); err != nil {
 		return res, err
 	}
+	if a.Trial {
+		if a.Artifact != "" || a.Installed != nil {
+			return res, errors.New("a Trial run boots the known-good kernel; it takes no kernel artifact or installed entry")
+		}
+		if _, ok := b.(*limineLayout); !ok {
+			return res, errors.New("Trial runs need Limine (the boot from a Trial system is a UKI with its own rootflags)")
+		}
+	}
 	if lim, ok := b.(*limineLayout); ok {
 		if a.Installed != nil {
 			in := *a.Installed
@@ -106,6 +114,15 @@ func (l *Linux) stageLimine(ctx context.Context, job string, a api.StageArgs, kg
 	if err != nil {
 		return res, err
 	}
+	if a.Trial {
+		if cmdline, err = trialCmdline(cmdline, job); err != nil {
+			return res, err
+		}
+		if err := l.prepareTrial(job); err != nil {
+			l.removeJob(job)
+			return res, err
+		}
+	}
 	uki := filepath.Join(bootDir, "uki.efi")
 	krel := kg.Kernel
 	if a.Artifact != "" {
@@ -118,9 +135,15 @@ func (l *Linux) stageLimine(ctx context.Context, job string, a api.StageArgs, kg
 	if err != nil {
 		l.removeJob(job)
 		lim.writeEntries()
+		if a.Trial {
+			l.removeTrials(job, false)
+		}
 		return res, err
 	}
 	title := fmt.Sprintf("maclab %s: %s", job, krel)
+	if a.Trial {
+		title += " (Trial system)"
+	}
 	os.WriteFile(filepath.Join(bootDir, "krel"), []byte(krel), 0o644)
 	if err := os.WriteFile(filepath.Join(bootDir, limineEntry), []byte(lim.entryText(job, title)), 0o644); err != nil {
 		return res, err
@@ -462,7 +485,8 @@ func (l *Linux) removeJob(job string) error {
 
 func (l *Linux) Cleanup(job string, all bool) error {
 	defer syncDisks()
-	return cleanupAfterMesa(l.cleanupMesa(job, all), func() error { return l.cleanupKernel(job, all) })
+	err := cleanupAfterMesa(l.cleanupMesa(job, all), func() error { return l.cleanupKernel(job, all) })
+	return errors.Join(err, l.removeTrials(job, all))
 }
 
 // A preserved/unreadable Mesa prefix is an error, not permission to skip the

@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -51,13 +52,21 @@ const (
 	sddmAutologinConf = "/etc/sddm.conf.d/zz-maclab-autologin.conf"
 )
 
+// labUnitNames and labUnitPaths are every systemd unit setup installs and
+// enables, by name and by unit file, lab-agent.service first. Leaving and
+// uninstall both take all of them out.
+var (
+	labUnitNames = []string{"lab-agent.service", labBootDeadlineUnitName, labBootSessionUnitName, labBootLockUnitName}
+	labUnitPaths = []string{unitPath, labBootDeadlineUnitPath, labBootSessionUnitPath, labBootLockUnitPath}
+)
+
 // defaultLeaveLayout is the layout setup writes on a real Mac.
 func defaultLeaveLayout() leaveLayout {
 	l := leaveLayout{
 		Config:    ConfigPath,
-		Units:     []string{unitPath, labBootDeadlineUnitPath, labBootSessionUnitPath, labBootLockUnitPath},
-		UnitNames: []string{"lab-agent.service", labBootDeadlineUnitName, labBootSessionUnitName, labBootLockUnitName},
-		DropIns:   []string{labBootAutologinPath, sysctlPath, watchdogCfg, serialGettyDropIn, sddmAutologinConf},
+		Units:     slices.Clone(labUnitPaths),
+		UnitNames: slices.Clone(labUnitNames),
+		DropIns:   []string{labBootAutologinPath, labBootAutologinLink, sysctlPath, watchdogCfg, serialGettyDropIn, sddmAutologinConf},
 		Stage:     stageDir(),
 		WorkDir:   "/var/lib/maclab",
 	}
@@ -185,11 +194,12 @@ func (l *Linux) LeaveLab(keepAgent bool) error {
 	if b, err := detectBootloader(); err == nil {
 		b.disarm() // no lab entry may be left armed to boot
 	}
+	trialErr := l.removeTrials("", true) // Trial systems are the lab's too
 	p, err := leaveCleanup(defaultLeaveLayout())
 	if err != nil {
-		return err
+		return errors.Join(trialErr, err)
 	}
-	return p.apply(keepAgent)
+	return errors.Join(trialErr, p.apply(keepAgent))
 }
 
 // LeaveLab removes the lab's boot entries from the simulated Mac.
@@ -197,6 +207,7 @@ func (s *Sim) LeaveLab(keepAgent bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.staged, s.armed = map[string]simEntry{}, ""
+	s.trials = nil
 	return nil
 }
 

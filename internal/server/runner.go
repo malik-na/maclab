@@ -111,6 +111,17 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 		})
 	}
 
+	// A PR is pinned and sorted into kernel or userspace before the Mac is
+	// needed; a kernel PR is then built like any source.
+	if j.Spec.PR != "" && j.Spec.Source == "" {
+		if outcome, summary := r.resolvePR(ctx); outcome != "" {
+			if why := v.leaving(); why != "" {
+				outcome, summary = api.OutcomeCanceled, "canceled: "+why
+			}
+			r.finish(outcome, summary)
+			return
+		}
+	}
 	// A source is built (or an identical earlier build reused) before the Mac is needed.
 	if j.Spec.Source != "" && j.Spec.Kernel == "" {
 		if outcome, summary := r.build(ctx); outcome != "" {
@@ -238,6 +249,9 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 				outcome = api.OutcomeInfra
 			}
 			summary += "; restore failed: " + err.Error()
+		} else {
+			// back on the own system: a Trial run must have left it as it was
+			outcome, summary = r.trialAfter(rctx, outcome, summary)
 		}
 	default:
 		d := v.snapshot()
@@ -374,10 +388,18 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 		}
 	}
 
+	if j.Spec.Trial {
+		if o, sum := r.trialBefore(ctx); o != "" {
+			return o, sum
+		}
+	}
 	r.state(api.JobStaging)
 	what := "current kernel"
 	if j.Spec.Kernel != "" {
 		what = "kernel " + short(j.Spec.Kernel)
+	}
+	if j.Spec.Trial {
+		what = "the known-good kernel from a Trial system (a throwaway snapshot of the Mac's own system)"
 	}
 	if r.ir != nil {
 		what = "installed " + r.ir.c.man.Kernel.Release + " through the installer's entry"
@@ -390,6 +412,7 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 	if r.ir != nil {
 		args = api.StageArgs{Serial: r.serialEnabled(), Installed: r.ir.stageArgs()}
 	}
+	args.Trial = j.Spec.Trial
 	args.WatchdogOpenTimeoutSec = int(r.s.cfg.WatchdogOpenTimeout / time.Second)
 	sr, outcome, why := r.stage(ctx, args)
 	if outcome != "" {
@@ -472,6 +495,13 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 		j.Result.Booted, j.Result.BootKernel, j.Result.BootSeconds, j.Result.BootCmdline = true, d.Kernel, secs, d.Cmdline
 	})
 	r.ev("booted %s in %.0fs", d.Kernel, secs)
+	if j.Spec.Trial {
+		want := "subvol=/maclab-trial/" + j.ID + "/@"
+		if !strings.Contains(d.Cmdline, want) {
+			return api.OutcomeInfra, "the Lab boot did not run from its Trial system (no " + want + " on its cmdline); no test ran"
+		}
+		r.ev("running from Trial system %s; the own system is not mounted for the tests", strings.TrimPrefix(want, "subvol="))
+	}
 	r.capture("after-boot")
 
 	if j.Spec.Crash != "" {
@@ -716,6 +746,16 @@ func (r *jobRun) tests() []api.TestSpec {
 	tests := testsFor(r.j.Spec)
 	if r.ir != nil {
 		tests = append(append([]api.TestSpec{r.ir.test(installed.PhaseBooted)}, tests...), r.ir.test(installed.PhaseAfter))
+	}
+	if r.j.Spec.Trial {
+		// every test of a Trial run is the Trial system's: lab-agent refuses it anywhere else
+		tree := r.prTree()
+		for i := range tests {
+			tests[i].Trial = true
+			if tests[i].Script != "" {
+				tests[i].PR = tree
+			}
+		}
 	}
 	return tests
 }
