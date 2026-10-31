@@ -100,6 +100,17 @@ type Sim struct {
 	// noSnapshot is a Mac whose @ can't be snapshotted; see SetSnapshotable.
 	noSnapshot bool
 
+	// trials are the simulated Trial systems by job: each a copy of the own
+	// system's packages a Trial test changes; trial is the one this boot
+	// runs from. ownPkgs is the own system's package list; trialLeak makes a
+	// Trial test change it too, as a broken isolation would. prTrees are the
+	// PR commits Trial tests unpacked.
+	trials    map[string][]string
+	trial     string
+	ownPkgs   []string
+	trialLeak bool
+	prTrees   []string
+
 	unlock   func() // the boot waiting at the disk password prompt
 	snapshot *simDisk
 	notices  []string
@@ -129,7 +140,8 @@ type simDisk struct {
 
 type simEntry struct {
 	krel, behavior, cmdline string
-	half                    bool // a failed staging's leftovers
+	trial                   string // the job whose Trial system the entry boots from
+	half                    bool   // a failed staging's leftovers
 	noAppleWDT              bool
 }
 
@@ -269,6 +281,9 @@ func (s *Sim) Stage(ctx context.Context, job string, a api.StageArgs, fetch Fetc
 		s.staged[job] = simEntry{krel: in.Release, behavior: "ok", cmdline: cmdline}
 		s.mu.Unlock()
 		return api.StageResult{KernelRelease: in.Release, Entry: entryPrefix + job, Cmdline: cmdline}, nil
+	}
+	if a.Trial {
+		return s.stageTrial(job, a)
 	}
 	e := simEntry{krel: SimKnownGood, behavior: "ok"}
 	if a.Artifact != "" {
@@ -446,7 +461,7 @@ func (s *Sim) up(gen int, e simEntry) {
 		s.mu.Unlock()
 		return
 	}
-	s.kernel, s.cmdline, s.behavior, s.noAppleWDT = e.krel, e.cmdline, e.behavior, e.noAppleWDT
+	s.kernel, s.cmdline, s.behavior, s.noAppleWDT, s.trial = e.krel, e.cmdline, e.behavior, e.noAppleWDT, e.trial
 	s.alive = e.behavior != "no-network" // up, but labd never hears from it
 	if unit := s.earlyUnit; unit != nil {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -674,6 +689,9 @@ func (s *Sim) RunTest(ctx context.Context, job string, t api.TestSpec, fetch Fet
 	case strings.HasPrefix(t.Name, "suspend-") || strings.HasPrefix(t.Name, "quiet-suspend-"):
 		s.suspend(s.SuspendFor, strings.HasPrefix(t.Name, "suspend-"))
 	}
+	if err := s.trialTest(ctx, job, t, fetch); err != nil {
+		return api.TestResult{Name: t.Name, ExitCode: -1, Error: err.Error()}
+	}
 	if b == "crash-in-test" {
 		s.kmsg <- "Unable to handle kernel NULL pointer dereference at virtual address 0000000000000008"
 		time.Sleep(50 * time.Millisecond)
@@ -777,9 +795,17 @@ func (s *Sim) Cleanup(job string, all bool) error {
 		s.mesaSpecs = map[string]api.MesaSpec{}
 		s.staged = map[string]simEntry{}
 		s.armed = ""
+		for j := range s.trials {
+			if j != s.trial {
+				delete(s.trials, j)
+			}
+		}
 	} else {
 		delete(s.staged, job)
 		delete(s.mesaSpecs, job)
+		if job != s.trial {
+			delete(s.trials, job)
+		}
 	}
 	return nil
 }

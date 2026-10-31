@@ -579,6 +579,31 @@ Measured on a base M5 (10 cores, VM with 16 GB) with aurora's config: first buil
 rebuild of a warm tree about 40 seconds. Progress (stage, object count, ETA) and the log stream
 live on `/api/stream` (`build`, `buildlog`) and `/api/builds/{id}/log?follow=1`.
 
+## Test any PR, and put the Mac back
+
+```sh
+lab run m1air --pr https://github.com/AsahiLinux/linux/pull/123            # a kernel tree: built and booted
+lab run m1air --pr https://github.com/<org>/<repo>/pull/<n> --script apply.sh   # userspace: a Trial run
+lab run m1air --trial --script try-pacman-conf.sh                           # a Trial run with no PR
+```
+
+`--pr` takes any repository's PR, branch or commit URL (or `git-url#ref`). labd pins it to a commit
+and looks at its tree: one with `Kconfig`, `init/main.c` and `arch/arm64/Kconfig` is a kernel and is
+built and booted as `--kernel <url>` is; anything else is a userspace change (`--pr-kind` overrides).
+A userspace PR's `--script` tests apply and test it, as root, with labd's `git archive` of the
+commit unpacked in `$MACLAB_PR_DIR` (`$MACLAB_PR_REPO`, `$MACLAB_PR_REF`, `$MACLAB_PR_COMMIT` too).
+
+They run in a Trial system: a Lab boot of the known-good kernel from a writable btrfs snapshot
+of the Mac's own system (`@`, `@home`, `@pkg`: every subvolume fstab mounts but `/var/log`). The
+own system is never mounted for the tests, the ESP isn't either (the Trial system gets a copy of its
+files), swap is off, and only lab-agent's state (`/var/lib/maclab`) is shared. Nothing is rolled
+back: the reboot that ends every Lab boot boots the own system as it was, and cleanup deletes the
+snapshot. labd fingerprints the own system (package list, pacman.conf, fstab, mkinitcpio.conf,
+`/etc/default/limine`, os-release, the ESP's files but the lab's own) before staging and once the
+Mac is back; any difference fails the job and takes the Mac out of the pool. Trial runs need
+Limine, `/` on `subvol=@` named on the known-good cmdline, an Eligible Mac and lab-agent 0.9.0.
+[docs/trial-runs.md](docs/trial-runs.md) has the safety model and what is not verified yet.
+
 ## omarchy-m-test: hardware checks in every job
 
 On a Mac with a desktop user, every job also runs
@@ -826,6 +851,9 @@ emergency mode.
 - The named install operation (`pacman -U` of the Release's packages) and
   omarchy-m-test's preinstall run on a Volunteer's own, possibly locked,
   session.
+- PR and Trial runs (`--pr`, `--trial`): the Trial system's snapshot, rewritten fstab, boot
+  from `rootflags=subvol=/maclab-trial/<job>/@` and its cleanup have run only against the
+  simulated Mac. See [docs/trial-runs.md](docs/trial-runs.md).
 - Whether `apple_wdt` can be armed before the kernel starts (m1n1/U-Boot).
   If it can, tier 1 would also cover early-boot hangs.
 

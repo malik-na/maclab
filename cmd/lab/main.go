@@ -44,6 +44,11 @@ const usage = `lab: run kernels and tests on Omarchy Macs
   lab exec <device> <command...>      run a command on a Mac as root (agent, or serial if its network is down)
   lab run <device> [--kernel <file|sha256|build-id|github-url>] [--cmdline ".."] [--cmdline-base known-good|default|"<cmdline>"] [--cmdline-strip "glob .."] [--verbose-boot] [--test boot-health] [--gui-test gui-smoke]
                    [--script t.sh] [--gui-script t.sh] [--boot-timeout 240] [--script-timeout 90m] [--publish] [--omt-allow ids] [--no-wait]
+  lab run <device> --pr <pr-url|repo#ref> [--pr-kind kernel|userspace] [--script t.sh ..]
+                                      test any PR: a kernel tree is built and booted; anything else is applied and tested
+                                      by --script in a Trial system ($MACLAB_PR_DIR), thrown away after; the Mac's own
+                                      system is never mounted for it and is checked unchanged after
+  lab run <device> --trial --script t.sh   the same Trial system for a script with no PR
   lab crashtest <device>              deliberately panic the Mac and check it recovers by itself
   lab pack --build <O= dir> [-o kernel.tar.zst]    package a kernel build for lab run
   lab jobs [device] | lab job <id> | lab wait <id> | lab cancel <id> | lab logs <id> [file]
@@ -260,6 +265,9 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 		mesaPublic := fs.String("mesa-signing-public-sha256", "", "with --mesa-official-gpu: actual existing GUI machine-key.pub file SHA256")
 		mesaState := fs.String("mesa-signing-state-home", "", "with --mesa-official-gpu: explicit existing normal XDG_STATE_HOME (never inferred from private job HOME)")
 		mesaBuild := fs.String("mesa-build", "", "with --mesa-package: the package build that produced the packages, for the record")
+		pr := fs.String("pr", "", "test a pull request, branch or commit of any repo (GitHub PR URL, repo#ref, ...): a kernel tree is built and booted; anything else runs the --script tests in a Trial system with the tree in $MACLAB_PR_DIR")
+		prKind := fs.String("pr-kind", "", "with --pr: kernel or userspace, instead of deciding by the tree")
+		trial := fs.Bool("trial", false, "run the --script tests in a Trial system: a Lab boot of the known-good kernel from a throwaway snapshot of the Mac's own system, which is checked unchanged afterwards")
 		var tests, guiTests, scripts, guiScripts, mesaPkgs multi
 		fs.Var(&mesaPkgs, "mesa-package", "a pinned Mesa split package to test, name=FILE or name=SHA256 (repeatable), e.g. mesa-aurora=mesa-aurora-…pkg.tar.zst")
 		fs.Var(&tests, "test", "builtin test to run (repeatable)")
@@ -275,6 +283,10 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 		spec.CmdlineBase = *cmdlineBase
 		spec.CmdlineStrip = strings.FieldsFunc(*cmdlineStrip, func(r rune) bool { return r == ',' || r == ' ' })
 		spec.VerboseBoot = *verboseBoot
+		spec.PR, spec.PRKind, spec.Trial = *pr, *prKind, *trial
+		if *pr != "" && *kernel != "" {
+			return errors.New("give --pr or --kernel, not both")
+		}
 		if *installedMan != "" {
 			sha, err := manifestSHA(*installedMan)
 			if err != nil {

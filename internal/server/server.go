@@ -1507,6 +1507,9 @@ func (s *Server) submit(maintainer string, spec api.JobSpec, retryOf string, not
 			return nil, 400, fmt.Errorf("test name %q must be non-empty with no slashes or spaces", t.Name)
 		}
 	}
+	if err := validatePR(spec, retryOf); err != nil {
+		return nil, 400, err
+	}
 	if why := needsFull(spec); why != "" {
 		if err := refuseAtAccessLevel(v.snapshot(), "Maintainer's script ("+why+")"); err != nil {
 			return nil, 403, err
@@ -1566,6 +1569,13 @@ func (s *Server) submit(maintainer string, spec api.JobSpec, retryOf string, not
 	if spec.Mesa != nil {
 		if code, err := s.validateMesa(spec, d.Device); err != nil {
 			return nil, code, err
+		}
+	}
+	// a PR that turns out to be a kernel needs none of this, but which it is
+	// takes a fetch: refuse a PR only when it is known to be userspace
+	if spec.Trial || spec.PRKind == api.PRUserspace {
+		if err := trialAdmission(d.Device); err != nil {
+			return nil, 409, err
 		}
 	}
 	if l := d.Lease; l != nil && l.Holder != spec.Holder {

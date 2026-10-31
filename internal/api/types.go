@@ -4,6 +4,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -300,6 +301,9 @@ const (
 	// Qualification and records in its Audit log with the Maintainer and the
 	// Release.
 	CmdInstall = "install"
+	// CmdOwnSystem reads a fingerprint of the Mac's own system (OwnSystem),
+	// read-only, before and after a Trial run.
+	CmdOwnSystem = "own_system"
 )
 
 // InstallTimeout is how long labd gives a Mac to install a Release: fetching
@@ -387,6 +391,10 @@ type StageArgs struct {
 	// The agent takes the boot's watchdog deadline from it; 0 (an older
 	// labd) leaves the agent's default.
 	BootTimeoutSec int `json:"boot_timeout_sec,omitempty"`
+	// Trial stages a Lab boot of the Known-good kernel from a new Trial
+	// system: lab-agent snapshots the Mac's own system (@) for it and points
+	// the boot's rootflags at the snapshot (see JobSpec.Trial).
+	Trial bool `json:"trial,omitempty"`
 }
 
 func (a StageArgs) WatchdogOpenTimeout() time.Duration {
@@ -515,6 +523,12 @@ type TestSpec struct {
 	// Identity makes the test the lab's own identity check of an Installed
 	// run: lab-agent runs its own read-only collector, not a script.
 	Identity *IdentityCheck `json:"identity,omitempty"`
+	// Trial: the test runs only in its job's Trial system; lab-agent refuses
+	// it on any other boot, the Mac's own system above all.
+	Trial bool `json:"trial,omitempty"`
+	// PR is the userspace PR tree a Trial run's script gets in
+	// $MACLAB_PR_DIR; it needs Trial.
+	PR *PRTree `json:"pr,omitempty"`
 }
 
 // IdentityCheck is what an Installed run's identity check observes: the
@@ -620,6 +634,86 @@ type JobSpec struct {
 	// Mesa makes the job a first-class Mesa test of pinned split packages.
 	// See MesaSpec for what each mode does and does not claim.
 	Mesa *MesaSpec `json:"mesa,omitempty"`
+	// PR is a pull request, branch or commit to test, in any form Source
+	// takes (a GitHub PR URL, repo#ref, ...). labd pins it to a commit and
+	// picks the path itself: a Linux kernel tree is built and booted as
+	// Source is; anything else is a userspace change, run by the job's
+	// --script tests in a Trial system (Trial), with the PR's tree in
+	// $MACLAB_PR_DIR.
+	PR string `json:"pr,omitempty"`
+	// PRKind overrides that choice: PRKernel or PRUserspace; "" decides by
+	// the tree. labd records the choice here once made.
+	PRKind string `json:"pr_kind,omitempty"`
+	// Trial runs the job's tests in a Trial system: a Lab boot of the
+	// Known-good kernel from a writable btrfs snapshot of the Mac's own
+	// system (@), so what the tests change (packages, pacman.conf, the boot
+	// setup, /etc) is thrown away with it. The Mac's own system is never
+	// mounted for them, and labd checks it is unchanged afterwards.
+	Trial bool `json:"trial,omitempty"`
+}
+
+// PR kinds: how a PR job tests its tree.
+const (
+	PRKernel    = "kernel"    // a Linux kernel tree: built and booted, as Source
+	PRUserspace = "userspace" // anything else: applied and tested in a Trial system
+)
+
+// PRTree is a userspace PR's tree as a Trial run's script sees it: labd's
+// git archive of the pinned commit, which lab-agent fetches by sha256 and
+// unpacks inside the Trial system.
+type PRTree struct {
+	Repo    string `json:"repo"`
+	Ref     string `json:"ref,omitempty"`
+	Commit  string `json:"commit"`
+	Archive string `json:"archive"` // sha256 of the tar
+}
+
+// PRResult is what labd made of a job's PR.
+type PRResult struct {
+	Source Source `json:"source"` // pinned: Source.SHA is the commit tested
+	Kind   string `json:"kind"`   // PRKernel or PRUserspace
+	Why    string `json:"why"`    // how the kind was decided
+	// Archive is the userspace tree's tar (see PRTree), "" for a kernel.
+	Archive string `json:"archive,omitempty"`
+}
+
+// OwnSystem is a fingerprint of a Mac's own system, which a Trial run must
+// leave as it found it: Digests maps what was read (the package list,
+// pacman.conf, fstab, the ESP's files without the lab's own) to a sha256.
+type OwnSystem struct {
+	Root    string            `json:"root"` // the btrfs subvolume / is, e.g. /@
+	Digests map[string]string `json:"digests"`
+}
+
+// Diff names what differs between two fingerprints, sorted; nil if none.
+func (o OwnSystem) Diff(after OwnSystem) []string {
+	var out []string
+	if o.Root != after.Root {
+		out = append(out, "root ("+o.Root+" -> "+after.Root+")")
+	}
+	for k, v := range o.Digests {
+		if after.Digests[k] != v {
+			out = append(out, k)
+		}
+	}
+	for k := range after.Digests {
+		if _, ok := o.Digests[k]; !ok {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// TrialResult is a Trial run's own evidence: the Mac's own system before
+// the run and once it is back on it.
+type TrialResult struct {
+	Subvolume string     `json:"subvolume"` // the Trial system's root, e.g. /maclab-trial/<job>/@
+	Before    *OwnSystem `json:"before,omitempty"`
+	After     *OwnSystem `json:"after,omitempty"`
+	// Unchanged is true only when After was read and matches Before.
+	Unchanged bool     `json:"unchanged"`
+	Changed   []string `json:"changed,omitempty"`
 }
 
 // Mesa test modes. Staged is a diagnostic of the packages: they are unpacked
@@ -698,6 +792,8 @@ type JobResult struct {
 	OMT           *OMTResult       `json:"omt,omitempty"` // omarchy-m-test, when it ran
 	Installed     *InstalledResult `json:"installed,omitempty"`
 	Mesa          *MesaResult      `json:"mesa,omitempty"`
+	PR            *PRResult        `json:"pr,omitempty"`
+	Trial         *TrialResult     `json:"trial,omitempty"`
 }
 
 // InstalledResult is an installed-mode job's verdicts. The evidence files are

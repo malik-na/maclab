@@ -194,11 +194,12 @@ func (l *Linux) LeaveLab(keepAgent bool) error {
 	if b, err := detectBootloader(); err == nil {
 		b.disarm() // no lab entry may be left armed to boot
 	}
+	trialErr := l.removeTrials("", true) // Trial systems are the lab's too
 	p, err := leaveCleanup(defaultLeaveLayout())
 	if err != nil {
-		return err
+		return errors.Join(trialErr, err)
 	}
-	return p.apply(keepAgent)
+	return errors.Join(trialErr, p.apply(keepAgent))
 }
 
 // LeaveLab removes the lab's boot entries from the simulated Mac.
@@ -206,6 +207,7 @@ func (s *Sim) LeaveLab(keepAgent bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.staged, s.armed = map[string]simEntry{}, ""
+	s.trials = nil
 	return nil
 }
 
