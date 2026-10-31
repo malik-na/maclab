@@ -34,9 +34,16 @@ runs on a copy of it.
 
 1. Before staging, labd asks lab-agent for a read-only fingerprint of the
    own system (`own_system`): `pacman -Q`, `/etc/pacman.conf`, `/etc/fstab`,
-   `/etc/mkinitcpio.conf`, `/etc/default/limine`, `/etc/os-release`, and
+   `/etc/mkinitcpio.conf`, `/etc/default/limine`, `/etc/os-release`,
    every file on the ESP except the lab's own (its stage directory,
-   U-Boot's variable file, the lab's marked block in `limine.conf`).
+   U-Boot's variable file, the lab's marked block in `limine.conf`), and,
+   where `/boot` is its own filesystem (ext4 with the kernel and initramfs,
+   the ESP at `/boot/efi`), every regular file on it (`boot`). The ESP
+   digest also skips `loader/random-seed`, which
+   `systemd-boot-random-seed.service` rewrites on every boot, and macOS's
+   `.fseventsd`, `.Spotlight-V100` and `.Trashes`. A lab entry left in
+   `limine.conf` outside the marked block (an orphan of an earlier Lab boot)
+   is part of the fingerprint like any other line.
 2. Staging (`stage` with `trial`) mounts the root filesystem's top level
    (`subvolid=5`) privately and snapshots `@`, and each other subvolume
    fstab mounts from it except `/var/log`, to `maclab-trial/<job>/`. It
@@ -52,14 +59,19 @@ runs on a copy of it.
    - `@` is mounted at `/run/maclab/own-system` only to bind its
      `/var/lib/maclab` onto `/var/lib/maclab`: lab-agent's state (the Audit
      log, Availability window, Access level, the Lab boot's deadline record)
-     stays the Mac's one copy.
+     stays the Mac's one copy. It takes `/`'s options without
+     `x-systemd.growfs`.
    It refuses what it can't place: `/` not on `subvol=@`, a mount of the
    top level, a nested subvolume, a known-good cmdline without exactly one
    `rootflags=...subvol=@` (the boot could then mount `@`), or a bootloader
    other than Limine.
 3. The Lab boot is the existing one-shot UKI of the Known-good kernel, with
-   `rootflags` pointed at the Trial root and `resume=`/`resume_offset=`
-   dropped. labd checks the booted cmdline names the Trial root before any
+   `rootflags` pointed at the Trial root, `resume=`/`resume_offset=`
+   dropped, and `systemd.gpt_auto=0` added (any `systemd.gpt_auto=` or
+   `rd.systemd.gpt_auto=` it had is dropped). Limine sets
+   `LoaderDevicePartUUID`, and the Trial fstab has no `/boot` or `/boot/efi`
+   entry, so without it `systemd-gpt-auto-generator` could mount the real
+   ESP read-write in the Trial system. labd checks the booted cmdline names the Trial root before any
    test runs, and lab-agent refuses a Trial test (`run_test` with `trial`)
    on any boot but its own job's Trial system, whatever labd sends.
 4. The tests run. A userspace PR's scripts fetch its tree by sha256.
@@ -110,4 +122,6 @@ fstab rewriting (`internal/agent/trial_test.go`). Open on hardware:
   system (the ESP is a plain directory there).
 - `btrfs subvolume delete --recursive` on the Macs' btrfs-progs.
 - The fingerprint being stable across a plain reboot of the own system
-  (nothing else rewriting `limine.conf` or the ESP between before and after).
+  (nothing else rewriting `limine.conf`, the ESP or a separate `/boot`
+  between before and after).
+- `systemd.gpt_auto=0` keeping the real ESP unmounted in a Trial boot.

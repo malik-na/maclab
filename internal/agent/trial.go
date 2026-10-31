@@ -75,9 +75,12 @@ func trialOfSubvol(sub string) string {
 }
 
 // trialCmdline turns the Lab boot cmdline into the Trial system's: rootflags'
-// subvol=@ becomes the job's Trial root, and a resume from the own system's
-// swap is dropped. It refuses a cmdline that doesn't name @ explicitly, since
-// then it can't be sure the boot mounts the Trial system and not @.
+// subvol=@ becomes the job's Trial root, a resume from the own system's swap
+// is dropped, and systemd.gpt_auto=0 keeps systemd-gpt-auto-generator from
+// mounting the real ESP (Limine sets LoaderDevicePartUUID, and the Trial
+// fstab has no /boot or /boot/efi entry, so it otherwise would). It refuses
+// a cmdline that doesn't name @ explicitly, since then it can't be sure the
+// boot mounts the Trial system and not @.
 func trialCmdline(cmdline, job string) (string, error) {
 	if !reJobName.MatchString(job) {
 		return "", fmt.Errorf("bad job id %q", job)
@@ -87,7 +90,7 @@ func trialCmdline(cmdline, job string) (string, error) {
 	for _, f := range strings.Fields(cmdline) {
 		name, val, _ := strings.Cut(f, "=")
 		switch name {
-		case "resume", "resume_offset", "hibernate":
+		case "resume", "resume_offset", "hibernate", "systemd.gpt_auto", "rd.systemd.gpt_auto":
 			continue
 		case "rootflags":
 			opts := strings.Split(val, ",")
@@ -111,6 +114,7 @@ func trialCmdline(cmdline, job string) (string, error) {
 	if found != 1 {
 		return "", errors.New("the known-good cmdline has no single rootflags=subvol=@, so a Trial system's boot could mount the own system")
 	}
+	out = append(out, "systemd.gpt_auto=0")
 	return strings.Join(out, " "), nil
 }
 
@@ -153,6 +157,15 @@ func setSubvol(opts, sub string) string {
 			parts[i] = "subvol=" + sub
 		}
 	}
+	return strings.Join(parts, ",")
+}
+
+// dropOpt removes every option named name (name or name=...) from opts.
+func dropOpt(opts, name string) string {
+	parts := slices.DeleteFunc(strings.Split(opts, ","), func(o string) bool {
+		k, _, _ := strings.Cut(o, "=")
+		return k == name
+	})
 	return strings.Join(parts, ",")
 }
 
@@ -230,7 +243,9 @@ func planTrial(fstab, espTarget, job string) (trialPlan, error) {
 			off(line, "not mounted in a Trial system")
 		}
 	}
-	ownOpts := setSubvol(rootOpts, "/@")
+	// x-systemd.growfs would have systemd grow the own system's filesystem
+	// from a mount that is only there for the bind
+	ownOpts := dropOpt(setSubvol(rootOpts, "/@"), "x-systemd.growfs")
 	out = append(out,
 		"# maclab Trial system: lab-agent's state is the own system's, so the Audit log, window and deadlines stay one copy",
 		fstabLine{spec: rootSpec, target: trialOwnMount, fstype: "btrfs", opts: ownOpts, rest: []string{"0", "0"}}.String(),
@@ -493,32 +508,87 @@ func (l *Linux) OwnSystem() (api.OwnSystem, error) {
 		return o, err
 	}
 	o.Digests["esp"] = esp
+	// a separate /boot (ext4 with vmlinuz and the initramfs, the ESP at
+	// /boot/efi) is not on @, so neither the packages nor the ESP cover it
+	if b, err := findMount("/boot"); err == nil && b.Target == "/boot" && b.Target != lim.ESP.Target {
+		boot, err := bootDigest(b.Target)
+		if err != nil {
+			return o, fmt.Errorf("/boot: %w", err)
+		}
+		o.Digests["boot"] = boot
+	}
 	return o, nil
 }
 
+// espMetadataDirs are what macOS writes on a FAT volume it sees, not the
+// Mac's boot setup.
+var espMetadataDirs = map[string]bool{".fseventsd": true, ".Spotlight-V100": true, ".Trashes": true}
+
 // espDigest hashes every file on the ESP but the lab's own: its stage
 // directory, U-Boot's variable file (the one-shot) and the lab's marked
-// block in limine.conf, which come and go with every Lab boot.
+// block in limine.conf, which come and go with every Lab boot. It skips
+// loader/random-seed too, which systemd-boot-random-seed.service rewrites on
+// every boot, and macOS's metadata directories.
 func espDigest(lim *limineLayout) (string, error) {
+	seed := filepath.Join(lim.ESP.Target, "loader", "random-seed")
+	return treeDigest(lim.ESP.Target, func(p string, d fs.DirEntry) bool {
+		if d.IsDir() {
+			return p == lim.Stage || (filepath.Dir(p) == lim.ESP.Target && espMetadataDirs[d.Name()])
+		}
+		return p == lim.VarFile || p == seed
+	}, func(p string, b []byte) []byte {
+		if p == lim.Conf {
+			return []byte(strings.TrimRight(reMaclabBlock.ReplaceAllString(string(b), "\n"), "\n") + "\n")
+		}
+		return b
+	})
+}
+
+// bootDigest hashes every regular file on a separate /boot filesystem. It
+// stays on that filesystem: an ESP mounted inside it (/boot/efi) is
+// espDigest's. Nothing else is skipped; a Trial run doesn't mount /boot, and
+// nothing on it changes across a plain reboot.
+func bootDigest(dir string) (string, error) {
+	var st unix.Stat_t
+	if err := unix.Stat(dir, &st); err != nil {
+		return "", err
+	}
+	dev := st.Dev
+	return treeDigest(dir, func(p string, d fs.DirEntry) bool {
+		if !d.IsDir() || p == dir {
+			return false
+		}
+		var s unix.Stat_t
+		return unix.Lstat(p, &s) == nil && s.Dev != dev
+	}, nil)
+}
+
+// treeDigest hashes the regular files under root, each with its path relative
+// to root, but those skip says to leave out (a directory: all of it).
+// transform, if set, may rewrite a file's contents before hashing.
+func treeDigest(root string, skip func(p string, d fs.DirEntry) bool, transform func(p string, b []byte) []byte) (string, error) {
 	var lines []string
-	err := filepath.WalkDir(lim.ESP.Target, func(p string, d fs.DirEntry, err error) error {
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if p == lim.Stage && d.IsDir() {
-			return filepath.SkipDir
+		if skip(p, d) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
-		if d.IsDir() || !d.Type().IsRegular() || p == lim.VarFile {
+		if d.IsDir() || !d.Type().IsRegular() {
 			return nil
 		}
 		b, err := os.ReadFile(p)
 		if err != nil {
 			return err
 		}
-		if p == lim.Conf {
-			b = []byte(strings.TrimRight(reMaclabBlock.ReplaceAllString(string(b), "\n"), "\n") + "\n")
+		if transform != nil {
+			b = transform(p, b)
 		}
-		rel, _ := filepath.Rel(lim.ESP.Target, p)
+		rel, _ := filepath.Rel(root, p)
 		lines = append(lines, sum(b)+"  "+rel)
 		return nil
 	})

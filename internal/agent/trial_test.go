@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -21,6 +23,17 @@ func TestTrialCmdlineBootsTheTrialSystem(t *testing.T) {
 	}
 	if !strings.Contains(got, "root=UUID=abc rw") || !strings.Contains(got, "maclab.job=j1") {
 		t.Errorf("the rest of the cmdline changed: %s", got)
+	}
+	if !strings.HasSuffix(got, " systemd.gpt_auto=0") || strings.Count(got, "gpt_auto") != 1 {
+		t.Errorf("a Trial system's boot must not let systemd-gpt-auto-generator mount the real ESP: %s", got)
+	}
+	// a gpt_auto the known-good cmdline already has can't turn it back on
+	got, err = trialCmdline("root=UUID=abc rootflags=subvol=@ systemd.gpt_auto=1 rd.systemd.gpt_auto=1", "j1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(got, "gpt_auto") != 1 || !strings.HasSuffix(got, " systemd.gpt_auto=0") {
+		t.Errorf("gpt_auto not forced off: %s", got)
 	}
 	if trialOfSubvol("/maclab-trial/j1/@") != "j1" || trialOfSubvol("/@") != "" || trialOfSubvol("/maclab-trial/j1/@home") != "" {
 		t.Error("trialOfSubvol")
@@ -96,6 +109,91 @@ func TestPlanTrialMountsNothingOfTheOwnSystemButLabState(t *testing.T) {
 	}
 	if !strings.Contains(p.Fstab, "# maclab Trial system: the ESP is not mounted") {
 		t.Errorf("the ESP line is not commented out with a reason:\n%s", p.Fstab)
+	}
+}
+
+func TestPlanTrialOwnSystemMountDoesNotGrowfs(t *testing.T) {
+	fstab := "UUID=abc / btrfs rw,x-systemd.growfs,compress=zstd:3,subvol=/@ 0 0\n"
+	p, err := planTrial(fstab, "/boot", "j1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(p.Fstab, "\n") {
+		if e, ok := parseFstabLine(line); ok && e.target == trialOwnMount {
+			if strings.Contains(e.opts, "growfs") || e.opts != "rw,compress=zstd:3,subvol=/@" {
+				t.Errorf("the own-system mount's options are %q", e.opts)
+			}
+			return
+		}
+	}
+	t.Errorf("no own-system mount:\n%s", p.Fstab)
+}
+
+func writeFile(t *testing.T, p, s string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(s), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestESPDigestIgnoresWhatEveryBootRewrites(t *testing.T) {
+	esp := t.TempDir()
+	lim := &limineLayout{ESP: mount{Target: esp}, Conf: filepath.Join(esp, "limine.conf"),
+		Stage: filepath.Join(esp, "maclab"), VarFile: filepath.Join(esp, "ubootefi.var")}
+	writeFile(t, filepath.Join(esp, "EFI/BOOT/BOOTAA64.EFI"), "limine")
+	writeFile(t, lim.Conf, "timeout: 3\n")
+	writeFile(t, filepath.Join(esp, "loader/random-seed"), "seed 1")
+	digest := func() string {
+		t.Helper()
+		d, err := espDigest(lim)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	before := digest()
+	writeFile(t, filepath.Join(esp, "loader/random-seed"), "seed 2")
+	writeFile(t, lim.VarFile, "one-shot")
+	writeFile(t, filepath.Join(lim.Stage, "j1.efi"), "uki")
+	writeFile(t, filepath.Join(esp, ".fseventsd/0001"), "x")
+	writeFile(t, filepath.Join(esp, ".Spotlight-V100/store"), "x")
+	writeFile(t, filepath.Join(esp, ".Trashes/501/x"), "x")
+	if after := digest(); after != before {
+		t.Error("the ESP digest changed with only random-seed, the lab's own files and macOS metadata")
+	}
+	writeFile(t, filepath.Join(esp, "EFI/BOOT/BOOTAA64.EFI"), "limine 2")
+	if digest() == before {
+		t.Error("the ESP digest missed a changed boot loader")
+	}
+	writeFile(t, filepath.Join(esp, "EFI/BOOT/BOOTAA64.EFI"), "limine")
+	writeFile(t, filepath.Join(esp, "sub/loader/random-seed"), "x")
+	if digest() == before {
+		t.Error("the ESP digest skipped a random-seed outside loader/")
+	}
+}
+
+func TestBootDigestCoversASeparateBoot(t *testing.T) {
+	boot := t.TempDir()
+	writeFile(t, filepath.Join(boot, "vmlinuz-linux-asahi"), "kernel")
+	writeFile(t, filepath.Join(boot, "initramfs-linux-asahi.img"), "initramfs")
+	before, err := bootDigest(boot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again, _ := bootDigest(boot); again != before {
+		t.Error("the /boot digest is not stable")
+	}
+	writeFile(t, filepath.Join(boot, "initramfs-linux-asahi.img"), "initramfs 2")
+	if after, _ := bootDigest(boot); after == before {
+		t.Error("the /boot digest missed a rebuilt initramfs")
+	}
+	writeFile(t, filepath.Join(boot, "initramfs-linux-asahi.img"), "initramfs")
+	writeFile(t, filepath.Join(boot, "vmlinuz-linux-test"), "kernel")
+	if after, _ := bootDigest(boot); after == before {
+		t.Error("the /boot digest missed a new kernel")
 	}
 }
 
