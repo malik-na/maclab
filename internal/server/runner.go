@@ -76,6 +76,7 @@ func (s *Server) deviceLoop(v *dev) {
 			delete(s.cancels, id)
 			s.mu.Unlock()
 		case <-tick.C():
+			v.unpark()
 			v.mu.Lock()
 			need := v.dirty && v.aliveLocked() && (v.d.State == api.StateReady || v.d.State == api.StateNew)
 			v.mu.Unlock()
@@ -93,6 +94,9 @@ func (s *Server) deviceLoop(v *dev) {
 
 func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 	r := &jobRun{s: s, v: v, j: j, boot: s.cfg.BootTimeout}
+	if r.park() {
+		return
+	}
 	if err := s.beginJobRecoveryMode(ctx, v, j); err != nil {
 		r.finish(api.OutcomeInfra, "recovery mode admission failed before device commands: "+err.Error())
 		return
@@ -124,11 +128,15 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 
 	// Queued jobs wait for the Mac, including for a human to power cycle it,
 	// and on a Volunteer's Mac for its Availability window, but not for one
-	// that left the lab.
+	// that left the lab. A lease someone else takes meanwhile sets the job
+	// aside instead (see park).
 	length := r.expectedLength()
 	holdLocked := func() string {
 		if v.d.State == api.StateLeft {
 			return ""
+		}
+		if why := v.leaseHoldsBackLocked(j.Spec.Holder, j.Maintainer); why != "" {
+			return why
 		}
 		if !v.aliveLocked() || (v.d.State != api.StateReady && v.d.State != api.StateNew) {
 			return fmt.Sprintf("waiting for %s to be ready (%s)", j.Spec.Device, v.d.State)
@@ -136,6 +144,9 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 		return v.windowHoldLocked(length)
 	}
 	for {
+		if r.park() {
+			return
+		}
 		v.mu.Lock()
 		why := holdLocked()
 		v.mu.Unlock()

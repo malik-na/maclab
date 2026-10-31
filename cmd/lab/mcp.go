@@ -278,7 +278,7 @@ func serveMCP(ctx context.Context) error {
 		Device     string `json:"device"`
 		TTLMinutes int    `json:"ttl_minutes,omitempty" jsonschema:"default 60"`
 	}
-	mcp.AddTool(s, &mcp.Tool{Name: "lab_lease", Description: "Reserve a Mac so only your jobs run on it."},
+	mcp.AddTool(s, &mcp.Tool{Name: "lab_lease", Description: "Reserve a Mac so only your jobs run on it until the lease ends: others' new jobs are refused and their queued ones wait. A job already running finishes first. A 409 saying a Mac is leased by someone else means wait for it to end or use another Mac."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, a leaseArg) (*mcp.CallToolResult, any, error) {
 			ttl := a.TTLMinutes
 			if ttl <= 0 {
@@ -287,7 +287,7 @@ func serveMCP(ctx context.Context) error {
 			l, err := c.Lease(ctx, a.Device, who, time.Duration(ttl)*time.Minute)
 			return text(l), nil, err
 		})
-	mcp.AddTool(s, &mcp.Tool{Name: "lab_release", Description: "Release your lease on a Mac."},
+	mcp.AddTool(s, &mcp.Tool{Name: "lab_release", Description: "Release your lease on a Mac; only the Maintainer who took a lease can release it."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, a devArg) (*mcp.CallToolResult, any, error) {
 			return text("released"), nil, c.Release(ctx, a.Device, who)
 		})

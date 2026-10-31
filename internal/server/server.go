@@ -1213,17 +1213,18 @@ func (s *Server) hLease(w http.ResponseWriter, r *http.Request) {
 	if req.TTLSec <= 0 {
 		req.TTLSec = 3600
 	}
+	me := maintainerName(r)
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if l := v.d.Lease; l != nil && s.now().Before(l.Expires) && l.Holder != req.Holder {
-		httpErr(w, 409, "%s is leased by %s until %s", v.d.Name, l.Holder, l.Expires.Format(time.TimeOnly))
+	if why := v.leaseHoldsBackLocked(req.Holder, me); why != "" {
+		httpErr(w, 409, "%s", why)
 		return
 	}
 	if v.d.IsVolunteer() && v.openUntilLocked().IsZero() {
 		httpErr(w, 409, "%s's Availability window is closed: a lease on a Volunteer's Mac lasts only inside it", v.d.Name)
 		return
 	}
-	v.d.Lease = &api.Lease{Holder: req.Holder, Expires: s.now().Add(time.Duration(req.TTLSec) * time.Second)}
+	v.d.Lease = &api.Lease{Holder: req.Holder, Maintainer: me, Expires: s.now().Add(time.Duration(req.TTLSec) * time.Second)}
 	v.capLeaseLocked()
 	v.saveLocked()
 	writeJSON(w, v.d.Lease)
@@ -1236,13 +1237,24 @@ func (s *Server) hRelease(w http.ResponseWriter, r *http.Request) {
 	}
 	holder := r.URL.Query().Get("holder")
 	v.mu.Lock()
-	defer v.mu.Unlock()
-	if l := v.d.Lease; l != nil && holder != "" && l.Holder != holder && s.now().Before(l.Expires) {
-		httpErr(w, 409, "leased by %s, not %s", l.Holder, holder)
-		return
+	if l := v.d.Lease; l != nil && s.now().Before(l.Expires) {
+		// Only the Maintainer who took a lease ends it early; anyone else
+		// waits for it to run out.
+		if me := maintainerName(r); l.Maintainer != "" && l.Maintainer != me {
+			v.mu.Unlock()
+			httpErr(w, 409, "%s is leased by %s until %s; only %s can release it", v.d.Name, l.Who(), l.Expires.Format(time.TimeOnly), l.Maintainer)
+			return
+		}
+		if holder != "" && l.Holder != holder {
+			v.mu.Unlock()
+			httpErr(w, 409, "leased by %s, not %s", l.Holder, holder)
+			return
+		}
 	}
 	v.d.Lease = nil
 	v.saveLocked()
+	v.mu.Unlock()
+	v.unpark()
 	w.Write([]byte("ok"))
 }
 
@@ -1266,8 +1278,8 @@ func (s *Server) hReset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A reset reboots the Mac, so a lease fences it like a job.
-	if lease != nil && s.now().Before(lease.Expires) && lease.Holder != by {
-		httpErr(w, 409, "%s is leased by %s until %s; only the lease holder can reset it", v.d.Name, lease.Holder, lease.Expires.Format(time.DateTime))
+	if lease != nil && s.now().Before(lease.Expires) && !lease.HeldBy(by, maintainerName(r)) {
+		httpErr(w, 409, "%s is leased by %s until %s; only the lease holder can reset it", v.d.Name, lease.Who(), lease.Expires.Format(time.DateTime))
 		return
 	}
 	back, err := s.rejoin(v, "reset requested by "+orStr(by, "an admin"))
@@ -1568,8 +1580,11 @@ func (s *Server) submit(maintainer string, spec api.JobSpec, retryOf string, not
 			return nil, code, err
 		}
 	}
-	if l := d.Lease; l != nil && l.Holder != spec.Holder {
-		return nil, 409, fmt.Errorf("%s is leased by %s until %s", d.Name, l.Holder, l.Expires.Format(time.TimeOnly))
+	v.mu.Lock()
+	leased := v.leaseHoldsBackLocked(spec.Holder, maintainer)
+	v.mu.Unlock()
+	if leased != "" {
+		return nil, 409, errors.New(leased)
 	}
 	now := s.now()
 	msg := "queued"
