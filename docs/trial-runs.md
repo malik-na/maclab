@@ -94,9 +94,11 @@ runs on a copy of it.
    the Mac goes to `new`, out of the pool, until a Maintainer looks. A
    failed restore still gets the check when the Mac is back on its own
    system anyway (only its cleanup failed, say). When it is not, or the
-   check can't run, the job says the own system was not checked and the
-   Mac goes to `new` too: at once, or once it is back if it is offline or
-   needs hands.
+   check can't run, or labd restarted during the run, the job says the own
+   system was not checked and the Mac goes to `new` too. The mark is stored
+   with the device (`trial_unchecked`), so the Mac comes back `new` however
+   it comes back (offline, needing hands, a labd restart, a job ending)
+   until a passing `lab baseline` clears it.
 
 ## What this does and does not protect against
 

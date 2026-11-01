@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -124,34 +125,85 @@ func TestTrialRunWhoseRestoreFailsIsStillChecked(t *testing.T) {
 	}
 }
 
-// A Trial run whose own system can't be checked afterwards (here the Mac
-// never comes back from the Lab boot) can't say it is as it was: the Mac
-// leaves the pool, and stays out once it is back.
-func TestTrialRunNotCheckedAfterwardsLeavesThePool(t *testing.T) {
+// A Trial run whose own system can't be checked afterwards can't say it is
+// as it was: the Mac leaves the pool and stays out, through needing hands
+// and coming back and through a job ending, until a passing baseline.
+func TestTrialRunNotCheckedAfterwardsStaysOutOfThePool(t *testing.T) {
 	l := newLab(t, true)
 	l.baseline()
-	j := l.run(api.JobSpec{Trial: true, Tests: []api.TestSpec{l.trialScript("migrate")}})
-	l.expect(j, api.OutcomePass)
 	v := l.s.dev(l.name)
-	r := &jobRun{s: l.s, v: v, j: j}
-	r.j.Result.Trial = &api.TrialResult{Before: j.Result.Trial.Before}
-	for _, st := range []api.DeviceState{api.StateReady, api.StateNeedsHands} {
-		v.mu.Lock()
-		v.d.State = st
-		v.mu.Unlock()
-		outcome, summary := r.trialUnchecked(api.OutcomePass, "booted", "it was not back on it")
-		if outcome != api.OutcomeInfra || !strings.Contains(summary, "not checked") {
-			t.Errorf("from %s: %s, %q", st, outcome, summary)
-		}
-		v.mu.Lock()
-		state, back, why := v.d.State, v.restore, v.restoreWhy
-		v.mu.Unlock()
-		switch {
-		case st == api.StateReady && state != api.StateNew:
-			t.Errorf("an unchecked Mac is %s, not out of the pool", state)
-		case st == api.StateNeedsHands && (state != api.StateNeedsHands || back != api.StateNew || !strings.Contains(why, "not checked")):
-			t.Errorf("an unchecked Mac that needs hands is %s and goes back to %s (%q)", state, back, why)
-		}
+	v.mu.Lock()
+	v.setStateLocked(api.StateNeedsHands, "power cycle it")
+	v.mu.Unlock()
+	reason := v.markTrialUnchecked("j1", "it was not back on it")
+	if d := v.snapshot(); d.State != api.StateNeedsHands || d.TrialUnchecked != reason {
+		t.Fatalf("a Mac that needs hands is %s (mark %q)", d.State, d.TrialUnchecked)
+	}
+	// its next check-in brings it back, as from any power cycle
+	d := l.waitDevice(func(d api.Device) bool { return d.State != api.StateNeedsHands })
+	if d.State != api.StateNew || !strings.Contains(d.StateReason, "not checked after Trial run j1") {
+		t.Fatalf("an unchecked Mac came back %s (%q)", d.State, d.StateReason)
+	}
+	// a job ending, as every job's does, can't put it back either
+	v.mu.Lock()
+	v.setStateLocked(v.idleStateLocked(), "")
+	v.mu.Unlock()
+	if d := v.snapshot(); d.State != api.StateNew {
+		t.Fatalf("after a job an unchecked Mac is %s", d.State)
+	}
+	l.baseline()
+	if d := l.waitDevice(func(d api.Device) bool { return d.State == api.StateReady }); d.TrialUnchecked != "" {
+		t.Errorf("a passing baseline left the mark: %q", d.TrialUnchecked)
+	}
+}
+
+// labd restarting mid Trial run ends the job with no after-check: the Mac is
+// marked unchecked, in the stored device, and does not come back ready,
+// through another restart too.
+func TestLabdRestartMidTrialRunLeavesTheMacUnchecked(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := Config{DataDir: t.TempDir(), FirstMaintainer: harnessMaintainer, FirstMaintainerToken: "a"}
+	quiet := log.New(io.Discard, "", 0)
+	s1, err := New(ctx, cfg, quiet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const job = "j1102-000000-abcd"
+	d := api.Device{ID: "d1", Name: "m1", State: api.StateBusy, KnownGood: "k", ActiveJob: job, BootID: "b"}
+	if err := s1.store.saveDevice(&d, "hash"); err != nil {
+		t.Fatal(err)
+	}
+	j := &api.Job{ID: job, Spec: api.JobSpec{Device: "m1", Trial: true}, State: api.JobTesting,
+		Result: api.JobResult{Trial: &api.TrialResult{Before: &api.OwnSystem{Root: "/@", Digests: map[string]string{"packages": "x"}}}}}
+	if err := s1.store.saveJob(j); err != nil {
+		t.Fatal(err)
+	}
+	// labd restarts while the Mac runs the Trial system's tests
+	s2, err := New(ctx, cfg, quiet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s2.store.job(job); err != nil || got.State != api.JobDone || !strings.Contains(got.Summary, "not checked after Trial run") {
+		t.Fatalf("job after restart: %+v %v", got, err)
+	}
+	v := s2.dev("m1")
+	if !strings.Contains(v.snapshot().TrialUnchecked, job) {
+		t.Fatalf("no unchecked mark after the restart: %+v", v.snapshot())
+	}
+	// it checks in again: not ready
+	v.mu.Lock()
+	v.setStateLocked(api.StateReady, "")
+	v.mu.Unlock()
+	if st := v.snapshot().State; st != api.StateNew {
+		t.Fatalf("an unchecked Mac came back %s", st)
+	}
+	s3, err := New(ctx, cfg, quiet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := s3.dev("m1").snapshot().TrialUnchecked; !strings.Contains(m, job) {
+		t.Errorf("the mark did not survive another restart: %q", m)
 	}
 }
 

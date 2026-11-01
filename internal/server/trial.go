@@ -363,19 +363,35 @@ func (r *jobRun) trialUnchecked(outcome, summary, why string) (string, string) {
 	if tr := r.j.Result.Trial; tr == nil || tr.Before == nil {
 		return outcome, summary
 	}
-	reason := "own system not checked after Trial run " + r.j.ID + " (" + why + "); a Maintainer must look before it runs again"
+	reason := r.v.markTrialUnchecked(r.j.ID, why)
 	r.ev("%s", reason)
-	v := r.v
-	v.mu.Lock()
-	switch v.d.State {
-	case api.StateNeedsHands, api.StateOffline:
-		v.restore, v.restoreWhy = api.StateNew, reason
-	default:
-		v.setStateLocked(api.StateNew, reason)
-	}
-	v.mu.Unlock()
 	if outcome == api.OutcomePass {
 		outcome = api.OutcomeInfra
 	}
 	return outcome, summary + "; the own system was not checked after the Trial run (" + why + "). The Mac is out of the pool"
+}
+
+// markTrialUnchecked records, in the stored device, that job's Trial run left
+// the own system unchecked (why says why), and takes the Mac out of the pool:
+// now, or, for a Mac offline or needing hands, whenever it is back (see
+// setStateLocked). It returns the reason the Mac's state gives.
+func (v *dev) markTrialUnchecked(job, why string) string {
+	reason := "own system not checked after Trial run " + job + " (" + why + "); a Maintainer must look, and lab baseline put it back, before it runs again"
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.d.TrialUnchecked = reason
+	switch v.d.State {
+	case api.StateNeedsHands, api.StateOffline, api.StateLeft:
+		v.saveLocked()
+	default:
+		v.setStateLocked(api.StateNew, reason)
+	}
+	return reason
+}
+
+// trialInterrupted is whether job j, which labd stopped running, was a Trial
+// run that may have touched the Mac and never checked its own system after.
+func trialInterrupted(j *api.Job) bool {
+	tr := j.Result.Trial
+	return j.Spec.Trial && tr != nil && tr.Before != nil && tr.After == nil
 }

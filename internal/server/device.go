@@ -40,7 +40,6 @@ type dev struct {
 	events        []api.KernelEvent
 	dirty         bool // a lab kernel may still be staged on the Mac
 	restore       api.DeviceState
-	restoreWhy    string // restore's reason, "" for none
 	queue         chan string
 	gone          chan struct{} // closed when the device is forgotten: ends deviceLoop
 	stop          chan struct{} // closed when the Mac's enrollment ends
@@ -163,6 +162,15 @@ func (v *dev) setStateLocked(st api.DeviceState, reason string) {
 	if v.d.State == api.StateLeft {
 		return
 	}
+	// A Mac whose own system was not checked after a Trial run stays out of
+	// the pool however it comes back: a job ending, a check-in after being
+	// offline or needing hands, a labd restart.
+	if st == api.StateReady && v.d.TrialUnchecked != "" {
+		st, reason = api.StateNew, v.d.TrialUnchecked
+		if v.d.State == st && v.d.StateReason == reason {
+			return
+		}
+	}
 	v.d.State, v.d.StateReason = st, reason
 	if st != api.StateNeedsHands {
 		v.d.Action = nil
@@ -246,8 +254,8 @@ func (v *dev) heartbeat(ci api.Checkin) {
 		if back == "" {
 			back = v.idleStateLocked()
 		}
-		v.setStateLocked(back, v.restoreWhy)
-		v.restore, v.restoreWhy = "", ""
+		v.setStateLocked(back, "")
+		v.restore = ""
 		if was == api.StateNeedsHands {
 			v.s.notify(Notification{Device: v.d.Name, Title: v.d.Name + " is back", Body: "Checked in on " + ci.Kernel + ". Nothing else to do.", Priority: "default"})
 		}

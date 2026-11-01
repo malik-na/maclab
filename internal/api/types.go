@@ -78,6 +78,10 @@ type Device struct {
 	Health                Health       `json:"health"`
 	Lease                 *Lease       `json:"lease,omitempty"`
 	ActiveJob             string       `json:"active_job,omitempty"`
+	// TrialUnchecked says why the Mac's own system was not checked after a
+	// Trial run ("" when nothing is pending): until a passing lab baseline
+	// clears it, the Mac is never ready, whatever brings it back.
+	TrialUnchecked string `json:"trial_unchecked,omitempty"`
 
 	// VolunteeredBy is the tailnet login whose ./volunteer token enrolled the
 	// Mac, lowercased; empty for a token an admin asked for. It counts toward

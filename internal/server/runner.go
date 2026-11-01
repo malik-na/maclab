@@ -290,6 +290,7 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 	if j.Spec.Baseline && outcome == api.OutcomePass {
 		v.mu.Lock()
 		v.d.KnownGood = v.d.Kernel
+		v.d.TrialUnchecked = "" // a Maintainer looked: the baseline vouches for the Mac again
 		v.saveLocked()
 		v.mu.Unlock()
 		summary += fmt.Sprintf(". %s is in the pool (known-good kernel %s)", j.Spec.Device, v.snapshot().Kernel)

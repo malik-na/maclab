@@ -285,6 +285,10 @@ func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
 			}
 		}
 		j.State, j.Outcome, j.Summary = api.JobDone, api.OutcomeInfra, "labd restarted while the job was running"
+		if v := s.devs[j.Spec.Device]; v != nil && trialInterrupted(j) {
+			why := v.markTrialUnchecked(j.ID, "labd restarted during it")
+			j.Summary += "; " + why
+		}
 		st.saveJob(j)
 	}
 	s.builds = newBuildMgr(s)
@@ -331,7 +335,7 @@ func (s *Server) monitor() {
 			// After a restart, agents need a moment to reconnect before silence means anything.
 			idle := (v.d.State == api.StateReady || v.d.State == api.StateNew) && s.since(s.start) > s.cfg.OfflineAfter
 			if idle && !v.d.LastSeen.IsZero() && s.since(v.d.LastSeen) > s.cfg.OfflineAfter && !v.quietLocked(s.now()) {
-				v.restore, v.restoreWhy = v.d.State, ""
+				v.restore = v.d.State
 				why := "no heartbeat since " + v.d.LastSeen.Format(time.TimeOnly)
 				if !v.asleep.IsZero() {
 					why = "asleep since " + v.asleep.Format(time.TimeOnly) + "; a key press wakes it"
