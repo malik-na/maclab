@@ -129,6 +129,33 @@ func TestPlanTrialOwnSystemMountDoesNotGrowfs(t *testing.T) {
 	t.Errorf("no own-system mount:\n%s", p.Fstab)
 }
 
+// A line planTrial moves to a Trial snapshot loses its subvolid=: it names
+// the own subvolume, and the kernel refuses a mount whose subvolid= and
+// subvol= disagree, so the Trial boot would stop in emergency mode.
+func TestPlanTrialDropsSubvolidFromWhatItMoves(t *testing.T) {
+	fstab := `UUID=abc / btrfs rw,noatime,subvolid=256,subvol=/@ 0 0
+UUID=abc /home btrfs rw,noatime,subvolid=257,subvol=/@home 0 0
+UUID=abc /var/log btrfs rw,noatime,subvolid=259,subvol=/@log 0 0
+`
+	p, err := planTrial(fstab, "/boot", "j1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(p.Fstab, "\n") {
+		e, ok := parseFstabLine(line)
+		if !ok {
+			continue
+		}
+		moved := strings.HasPrefix(optSubvol(e.opts), "/"+trialTopDir+"/")
+		if moved && strings.Contains(e.opts, "subvolid=") {
+			t.Errorf("%s moves to %s but keeps a subvolid=: %q", e.target, optSubvol(e.opts), e.opts)
+		}
+		if e.target == "/var/log" && !strings.Contains(e.opts, "subvolid=259") {
+			t.Errorf("the shared /var/log changed: %q", e.opts)
+		}
+	}
+}
+
 // A Trial test runs as root: the own system's @, mounted only for the bind
 // of lab-agent's state, is read-only, and only that bind is read-write,
 // whatever the own fstab's options say.

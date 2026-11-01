@@ -170,6 +170,13 @@ func dropOpt(opts, name string) string {
 	return strings.Join(parts, ",")
 }
 
+// moveSubvol points a btrfs mount's options at subvolume sub. It drops any
+// subvolid=: that names the own subvolume, and the kernel refuses a mount
+// whose subvolid= and subvol= disagree.
+func moveSubvol(opts, sub string) string {
+	return dropOpt(setSubvol(opts, sub), "subvolid")
+}
+
 // pseudoFS are filesystems with nothing on disk, which a Trial system mounts as the own system does.
 var pseudoFS = map[string]bool{"tmpfs": true, "proc": true, "sysfs": true, "devpts": true, "efivarfs": true, "ramfs": true,
 	"cgroup2": true, "bpf": true, "debugfs": true, "securityfs": true, "configfs": true, "tracefs": true, "hugetlbfs": true, "mqueue": true}
@@ -216,7 +223,7 @@ func planTrial(fstab, espTarget, job string) (trialPlan, error) {
 		}
 		switch {
 		case e.target == "/":
-			e.opts = setSubvol(e.opts, trialRoot(job))
+			e.opts = moveSubvol(e.opts, trialRoot(job))
 			out = append(out, e.String())
 		case e.fstype == "swap" || e.target == "none" || e.target == "swap":
 			off(line, "no swap")
@@ -235,7 +242,7 @@ func planTrial(fstab, espTarget, job string) (trialPlan, error) {
 				out = append(out, line) // shared on purpose: the journal
 			default:
 				p.Subvols = append(p.Subvols, sub)
-				e.opts = setSubvol(e.opts, "/"+trialTopDir+"/"+job+"/"+sub)
+				e.opts = moveSubvol(e.opts, "/"+trialTopDir+"/"+job+"/"+sub)
 				out = append(out, e.String())
 			}
 		case pseudoFS[e.fstype]:
