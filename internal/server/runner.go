@@ -266,6 +266,7 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 				outcome = api.OutcomeInfra
 			}
 			summary += "; restore failed: " + err.Error()
+			outcome, summary = r.trialAfterFailedRestore(outcome, summary)
 		} else {
 			// back on the own system: a Trial run must have left it as it was
 			outcome, summary = r.trialAfter(rctx, outcome, summary)
@@ -278,6 +279,7 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 			who = "is waiting for its Volunteer to reset it"
 		}
 		summary += ". " + d.Name + " " + who + "; the lab cleans up the staged kernel when it is back"
+		outcome, summary = r.trialUnchecked(outcome, summary, "it was not back on it")
 	}
 	if k := v.snapshot().Kernel; j.Spec.Baseline && outcome == api.OutcomePass && r.rerecorded != "" && k != r.rerecorded {
 		// restore's plain reboot boots the default entry: a kernel picked by

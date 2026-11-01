@@ -143,7 +143,7 @@ func (v *dev) ladder(ctx context.Context, reason string, bootTimeout time.Durati
 		n.Volunteer, n.MacTopic = true, v.s.macTopicURL(v.d.Enrollment)
 	}
 	v.d.Action = act
-	v.restore = ""
+	v.restore, v.restoreWhy = "", ""
 	v.setStateLocked(api.StateNeedsHands, reason)
 	v.dirty = true
 	v.mu.Unlock()

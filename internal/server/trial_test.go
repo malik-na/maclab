@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -95,6 +96,63 @@ func TestTrialRunThatHangsComesBackToTheOwnSystem(t *testing.T) {
 	}
 	l.noTrialsLeft()
 	l.waitDevice(func(d api.Device) bool { return d.Kernel == agent.SimKnownGood && d.Health.JobTag == "" })
+}
+
+// A Trial run whose restore fails is still checked when the Mac is back on
+// its own system anyway: here only the cleanup failed, and the own system
+// changed, so the Mac leaves the pool rather than going back to it.
+func TestTrialRunWhoseRestoreFailsIsStillChecked(t *testing.T) {
+	l := newLab(t, true)
+	l.baseline()
+	l.sim.SetTrialLeak(true)
+	l.sim.FailCleanup(func(job string, all bool) error {
+		if all {
+			return nil
+		}
+		return errors.New("btrfs subvolume delete: device busy")
+	})
+	j := l.run(api.JobSpec{Trial: true, Tests: []api.TestSpec{l.trialScript("migrate")}})
+	l.expect(j, api.OutcomeInfra)
+	if !strings.Contains(j.Summary, "restore failed") || !strings.Contains(j.Summary, "own system changed") {
+		t.Errorf("summary %q", j.Summary)
+	}
+	if tr := j.Result.Trial; tr == nil || tr.Unchanged || !slices.Equal(tr.Changed, []string{"packages"}) {
+		t.Fatalf("Trial result %+v", tr)
+	}
+	if d := l.s.dev(l.name).snapshot(); d.State != api.StateNew {
+		t.Errorf("a Mac whose own system changed is %s, not out of the pool", d.State)
+	}
+}
+
+// A Trial run whose own system can't be checked afterwards (here the Mac
+// never comes back from the Lab boot) can't say it is as it was: the Mac
+// leaves the pool, and stays out once it is back.
+func TestTrialRunNotCheckedAfterwardsLeavesThePool(t *testing.T) {
+	l := newLab(t, true)
+	l.baseline()
+	j := l.run(api.JobSpec{Trial: true, Tests: []api.TestSpec{l.trialScript("migrate")}})
+	l.expect(j, api.OutcomePass)
+	v := l.s.dev(l.name)
+	r := &jobRun{s: l.s, v: v, j: j}
+	r.j.Result.Trial = &api.TrialResult{Before: j.Result.Trial.Before}
+	for _, st := range []api.DeviceState{api.StateReady, api.StateNeedsHands} {
+		v.mu.Lock()
+		v.d.State = st
+		v.mu.Unlock()
+		outcome, summary := r.trialUnchecked(api.OutcomePass, "booted", "it was not back on it")
+		if outcome != api.OutcomeInfra || !strings.Contains(summary, "not checked") {
+			t.Errorf("from %s: %s, %q", st, outcome, summary)
+		}
+		v.mu.Lock()
+		state, back, why := v.d.State, v.restore, v.restoreWhy
+		v.mu.Unlock()
+		switch {
+		case st == api.StateReady && state != api.StateNew:
+			t.Errorf("an unchecked Mac is %s, not out of the pool", state)
+		case st == api.StateNeedsHands && (state != api.StateNeedsHands || back != api.StateNew || !strings.Contains(why, "not checked")):
+			t.Errorf("an unchecked Mac that needs hands is %s and goes back to %s (%q)", state, back, why)
+		}
+	}
 }
 
 func TestTrialAndPRRefusals(t *testing.T) {

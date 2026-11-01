@@ -91,6 +91,7 @@ type Sim struct {
 	installs    []string
 
 	stageFail  func(attempt int) error
+	cleanFail  func(job string, all bool) error // see FailCleanup
 	stageTries int
 
 	// A Volunteer's Mac. Every knob is off by default.
@@ -838,9 +839,22 @@ func (s *Sim) Logs(ctx context.Context, a api.LogsArgs) (string, error) {
 	return b.String(), nil
 }
 
+// FailCleanup makes each cleanup from now on ask f first: an error fails it
+// and leaves everything in place, as a failed btrfs subvolume delete would.
+func (s *Sim) FailCleanup(f func(job string, all bool) error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cleanFail = f
+}
+
 func (s *Sim) Cleanup(job string, all bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if f := s.cleanFail; f != nil {
+		if err := f(job, all); err != nil {
+			return err
+		}
+	}
 	if all {
 		s.mesaSpecs = map[string]api.MesaSpec{}
 		s.staged = map[string]simEntry{}

@@ -331,7 +331,7 @@ func (s *Server) monitor() {
 			// After a restart, agents need a moment to reconnect before silence means anything.
 			idle := (v.d.State == api.StateReady || v.d.State == api.StateNew) && s.since(s.start) > s.cfg.OfflineAfter
 			if idle && !v.d.LastSeen.IsZero() && s.since(v.d.LastSeen) > s.cfg.OfflineAfter && !v.quietLocked(s.now()) {
-				v.restore = v.d.State
+				v.restore, v.restoreWhy = v.d.State, ""
 				why := "no heartbeat since " + v.d.LastSeen.Format(time.TimeOnly)
 				if !v.asleep.IsZero() {
 					why = "asleep since " + v.asleep.Format(time.TimeOnly) + "; a key press wakes it"

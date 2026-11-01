@@ -90,7 +90,12 @@ runs on a copy of it.
    Leaving the lab deletes them too.
 7. labd reads the fingerprint again and compares. Unchanged: the summary
    says so. Changed: the job fails (`infra_error`) naming what changed, and
-   the Mac goes to `new`, out of the pool, until a Maintainer looks.
+   the Mac goes to `new`, out of the pool, until a Maintainer looks. A
+   failed restore still gets the check when the Mac is back on its own
+   system anyway (only its cleanup failed, say). When it is not, or the
+   check can't run, the job says the own system was not checked and the
+   Mac goes to `new` too: at once, or once it is back if it is offline or
+   needs hands.
 
 ## What this does and does not protect against
 

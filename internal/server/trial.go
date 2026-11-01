@@ -323,10 +323,7 @@ func (r *jobRun) trialAfter(ctx context.Context, outcome, summary string) (strin
 	o, err := r.ownSystem(ctx)
 	if err != nil {
 		r.ev("own system after the Trial run: %v", err)
-		if outcome == api.OutcomePass {
-			outcome = api.OutcomeInfra
-		}
-		return outcome, summary + "; the own system could not be checked after the Trial run: " + err.Error()
+		return r.trialUnchecked(outcome, summary, err.Error())
 	}
 	changed := tr.Before.Diff(*o)
 	r.s.updateJob(r.j, func(j *api.Job) {
@@ -340,4 +337,45 @@ func (r *jobRun) trialAfter(ctx context.Context, outcome, summary string) (strin
 	r.ev("%s", why)
 	r.v.setState(api.StateNew, why+"; a Maintainer must look before it runs again")
 	return api.OutcomeInfra, summary + "; " + why + ". The Mac is out of the pool"
+}
+
+// trialAfterFailedRestore is trialAfter when the restore failed: a Mac back
+// on its own system anyway (only its cleanup failed, say) is checked all
+// the same; any other is not checked, and leaves the pool.
+func (r *jobRun) trialAfterFailedRestore(outcome, summary string) (string, string) {
+	if tr := r.j.Result.Trial; tr == nil || tr.Before == nil {
+		return outcome, summary
+	}
+	if d := r.v.snapshot(); !r.v.alive() || d.Health.JobTag != "" {
+		return r.trialUnchecked(outcome, summary, "it was not back on it")
+	}
+	// restore's own deadline may be spent: the check gets its own
+	ctx, cancel := r.s.withTimeout(r.s.ctx, 3*time.Minute)
+	defer cancel()
+	return r.trialAfter(ctx, outcome, summary)
+}
+
+// trialUnchecked ends a Trial run whose own system labd could not check
+// afterwards (why says why): the job can't say the own system is as it was,
+// so the Mac leaves the pool until a Maintainer looks, now or, for a Mac that
+// is offline or needs hands, once it is back.
+func (r *jobRun) trialUnchecked(outcome, summary, why string) (string, string) {
+	if tr := r.j.Result.Trial; tr == nil || tr.Before == nil {
+		return outcome, summary
+	}
+	reason := "own system not checked after Trial run " + r.j.ID + " (" + why + "); a Maintainer must look before it runs again"
+	r.ev("%s", reason)
+	v := r.v
+	v.mu.Lock()
+	switch v.d.State {
+	case api.StateNeedsHands, api.StateOffline:
+		v.restore, v.restoreWhy = api.StateNew, reason
+	default:
+		v.setStateLocked(api.StateNew, reason)
+	}
+	v.mu.Unlock()
+	if outcome == api.OutcomePass {
+		outcome = api.OutcomeInfra
+	}
+	return outcome, summary + "; the own system was not checked after the Trial run (" + why + "). The Mac is out of the pool"
 }
