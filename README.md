@@ -955,9 +955,9 @@ emergency mode.
 - The named install operation (`pacman -U` of the Release's packages) and
   omarchy-m-test's preinstall run on a Volunteer's own, possibly locked,
   session.
-- PR and Trial runs (`--pr`, `--trial`): the Trial system's snapshot, rewritten fstab, boot
-  from `rootflags=subvol=/maclab-trial/<job>/@` and its cleanup have run only against the
-  simulated Mac. See [docs/trial-runs.md](docs/trial-runs.md).
+- PR and Trial runs (`--pr`, `--trial`): `--trial` runs have booted their Trial system and come
+  back to an unchanged own system on one M1 Air; other Macs and a hardware `--pr` run have
+  not. See [docs/trial-runs.md](docs/trial-runs.md).
 - Whether `apple_wdt` can be armed before the kernel starts (m1n1/U-Boot).
   If it can, tier 1 would also cover early-boot hangs.
 

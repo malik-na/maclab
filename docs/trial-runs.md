@@ -1,7 +1,8 @@
 # PR runs and Trial runs: testing any change, and the Mac's way back
 
-Status: implemented and tested against the simulated Mac only. Nothing here
-has run on a real Mac yet; see "Not verified" below.
+Status: implemented, tested against the simulated Mac, and run on one real
+Mac (a Lab-owned M1 Air on Omarchy, 2026-11-02); see "Verified on hardware"
+and "Not verified" below.
 
 ## What it is for
 
@@ -117,22 +118,41 @@ boots included, so the `/boot` fingerprint leaves out `*.log` files.
 own records are kept. Trial copies of `@home` and the rest are thrown away
 with `@`.
 
+## Verified on hardware
+
+On a Lab-owned M1 Air (Omarchy, Limine 12.9.6, systemd 262.1, util-linux
+2.42.4, btrfs-progs 7.3; `/` on `subvol=@` with `x-systemd.growfs`, a
+separate ext4 `/boot`, the ESP at `/boot/efi`, a nested `.snapshots`), with
+`--trial` runs of a probe script and of one that installs a package
+(`pacman -S cowsay`) and writes to `/etc`:
+
+- Limine and the initramfs booted `rootflags=subvol=/maclab-trial/<job>/@`,
+  and the Trial fstab mounted as planned: `/`, `/home` and
+  `/var/cache/pacman/pkg` from the job's snapshots, `@` read-only at
+  `/run/maclab/own-system` (a write there is refused), `/var/lib/maclab`
+  read-write through the bind, mounted before the early deadline unit
+  started. Neither `/boot` nor the ESP was mounted (`systemd.gpt_auto=0`);
+  the ESP copy was there. The only swap was zram.
+- The package installed in the Trial system and was not in the own system
+  afterwards, nor was the file written to `/etc`. snap-pac and
+  `limine-snapper-sync` ran inside the Trial system without changing the
+  real ESP. The own-system check passed, and cleanup deleted the job's
+  subvolumes (`btrfs subvolume delete --recursive`).
+- The fingerprint held across a Trial boot, a plain reboot and a second
+  Trial boot, except `/boot`: Omarchy's initramfs appends to
+  `/boot/omarchy/encrypt.log` on every boot, which failed the first run's
+  check. The `/boot` fingerprint now leaves out `*.log`; with it, the next
+  run's check passed. `limine.conf` and the rest of the ESP did not drift.
+
 ## Not verified
 
-None of this has run on a real Mac. Tested only in the simulated lab
-(`internal/server/trial_test.go`) and by unit tests of the cmdline and
-fstab rewriting (`internal/agent/trial_test.go`). Open on hardware:
+Open on hardware:
 
-- Booting a UKI with `rootflags=subvol=/maclab-trial/<job>/@` on an Omarchy
-  Mac: Limine, the initramfs (mkinitcpio's systemd hook) and
-  `systemd-remount-fs` honoring it, with the Trial fstab.
-- The fstab bind of `/var/lib/maclab` being in place before lab-agent's
-  early unit (`After=local-fs.target`) reads the deadline record.
-- Omarchy's real fstab and subvolume layout on Apple Silicon matching what
-  `planTrial` expects; snapper or `limine-snapper-sync` inside a Trial
-  system (the ESP is a plain directory there).
-- `btrfs subvolume delete --recursive` on the Macs' btrfs-progs.
-- The fingerprint being stable across a plain reboot of the own system
-  (nothing else rewriting `limine.conf`, the ESP or a separate `/boot`
-  between before and after).
-- `systemd.gpt_auto=0` keeping the real ESP unmounted in a Trial boot.
+- Any Mac but that one M1 Air: other chip families, layouts without a
+  separate `/boot`, a Volunteer's Mac.
+- A userspace `--pr` run on hardware (its PR tree fetch ran only in the
+  simulated lab), and a kernel `--pr`.
+- A Trial boot that fails to mount its fstab, and the watchdog bringing it
+  back; and a restore that fails mid Trial run.
+- Nested subvolumes (`.snapshots` here) show up as empty directories in the
+  Trial system; a test that needs them sees none.
