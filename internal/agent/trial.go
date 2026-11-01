@@ -290,10 +290,10 @@ func withTop(fn func(top string) error) error {
 	if err := os.MkdirAll(trialTopMount, 0o700); err != nil {
 		return err
 	}
-	if err := unix.Mount(btrfsDevice(root.Source), trialTopMount, "btrfs", unix.MS_NOATIME, "subvolid=5"); err != nil {
+	if err := mountTop(btrfsDevice(root.Source), trialTopMount); err != nil {
 		return fmt.Errorf("mounting the top level of %s: %w", btrfsDevice(root.Source), err)
 	}
-	defer unix.Unmount(trialTopMount, 0)
+	defer unmountTop(trialTopMount)
 	return fn(trialTopMount)
 }
 
