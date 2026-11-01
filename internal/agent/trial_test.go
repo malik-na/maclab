@@ -120,13 +120,46 @@ func TestPlanTrialOwnSystemMountDoesNotGrowfs(t *testing.T) {
 	}
 	for _, line := range strings.Split(p.Fstab, "\n") {
 		if e, ok := parseFstabLine(line); ok && e.target == trialOwnMount {
-			if strings.Contains(e.opts, "growfs") || e.opts != "rw,compress=zstd:3,subvol=/@" {
+			if strings.Contains(e.opts, "growfs") || e.opts != "ro,compress=zstd:3,subvol=/@" {
 				t.Errorf("the own-system mount's options are %q", e.opts)
 			}
 			return
 		}
 	}
 	t.Errorf("no own-system mount:\n%s", p.Fstab)
+}
+
+// A Trial test runs as root: the own system's @, mounted only for the bind
+// of lab-agent's state, is read-only, and only that bind is read-write,
+// whatever the own fstab's options say.
+func TestPlanTrialMountsTheOwnSystemReadOnly(t *testing.T) {
+	for _, opts := range []string{"rw,relatime,compress=zstd:3,subvol=/@", "defaults,subvol=/@", "subvol=/@"} {
+		p, err := planTrial("UUID=abc / btrfs "+opts+" 0 0\n", "/boot", "j1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var own, state *fstabLine
+		for _, line := range strings.Split(p.Fstab, "\n") {
+			if e, ok := parseFstabLine(line); ok {
+				switch e.target {
+				case trialOwnMount:
+					own = &e
+				case trialStateDir:
+					state = &e
+				}
+			}
+		}
+		if own == nil || state == nil {
+			t.Fatalf("own %s: no own-system mount or state bind:\n%s", opts, p.Fstab)
+		}
+		o := strings.Split(own.opts, ",")
+		if !slices.Contains(o, "ro") || slices.Contains(o, "rw") || slices.Contains(o, "defaults") {
+			t.Errorf("own %s: the own-system mount's options are %q, want read-only", opts, own.opts)
+		}
+		if s := strings.Split(state.opts, ","); !slices.Contains(s, "bind") || !slices.Contains(s, "rw") {
+			t.Errorf("own %s: lab-agent's state bind's options are %q, want bind,rw", opts, state.opts)
+		}
+	}
 }
 
 func writeFile(t *testing.T, p, s string) {

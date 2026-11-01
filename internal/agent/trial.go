@@ -16,7 +16,8 @@ package agent
 //	                            boot's journal outlives it
 //
 // The Trial system's fstab is rewritten so that nothing of the own system is
-// mounted read-write but lab-agent's own state: the ESP is not mounted (the
+// mounted read-write but lab-agent's own state (@ itself is mounted
+// read-only, only for that bind): the ESP is not mounted (the
 // Trial system gets a copy of its files at the same path instead), swap is
 // off, other disks are left out, and /var/lib/maclab is bind-mounted from
 // the own system, so the Audit log, the Availability window, the Access
@@ -243,13 +244,20 @@ func planTrial(fstab, espTarget, job string) (trialPlan, error) {
 			off(line, "not mounted in a Trial system")
 		}
 	}
-	// x-systemd.growfs would have systemd grow the own system's filesystem
-	// from a mount that is only there for the bind
-	ownOpts := dropOpt(setSubvol(rootOpts, "/@"), "x-systemd.growfs")
+	// The own system is mounted read-only, only for the bind: a Trial test
+	// running as root must not reach it there. x-systemd.growfs would have
+	// systemd grow the own system's filesystem from it; defaults would undo
+	// the ro. Only the bind of lab-agent's state is read-write (a bind
+	// starts with its source's read-only flag, so it says rw).
+	ownOpts := setSubvol(rootOpts, "/@")
+	for _, o := range []string{"x-systemd.growfs", "rw", "ro", "defaults"} {
+		ownOpts = dropOpt(ownOpts, o)
+	}
+	ownOpts = strings.TrimSuffix("ro,"+ownOpts, ",")
 	out = append(out,
 		"# maclab Trial system: lab-agent's state is the own system's, so the Audit log, window and deadlines stay one copy",
 		fstabLine{spec: rootSpec, target: trialOwnMount, fstype: "btrfs", opts: ownOpts, rest: []string{"0", "0"}}.String(),
-		fstabLine{spec: trialOwnMount + trialStateDir, target: trialStateDir, fstype: "none", opts: "bind,x-systemd.requires-mounts-for=" + trialOwnMount, rest: []string{"0", "0"}}.String())
+		fstabLine{spec: trialOwnMount + trialStateDir, target: trialStateDir, fstype: "none", opts: "bind,rw,x-systemd.requires-mounts-for=" + trialOwnMount, rest: []string{"0", "0"}}.String())
 	p.Fstab = strings.Join(out, "\n") + "\n"
 	return p, nil
 }

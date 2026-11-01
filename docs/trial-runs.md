@@ -59,8 +59,9 @@ runs on a copy of it.
    - `@` is mounted at `/run/maclab/own-system` only to bind its
      `/var/lib/maclab` onto `/var/lib/maclab`: lab-agent's state (the Audit
      log, Availability window, Access level, the Lab boot's deadline record)
-     stays the Mac's one copy. It takes `/`'s options without
-     `x-systemd.growfs`.
+     stays the Mac's one copy. It is mounted read-only (`/`'s options
+     without `rw`, `defaults` or `x-systemd.growfs`, plus `ro`), and only
+     the bind says `rw`, so a test can't change the own system through it.
    It refuses what it can't place: `/` not on `subvol=@`, a mount of the
    top level, a nested subvolume, a known-good cmdline without exactly one
    `rootflags=...subvol=@` (the boot could then mount `@`), or a bootloader
