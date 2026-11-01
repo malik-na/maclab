@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -388,4 +389,29 @@ func TestJobAuthorityEndsBeforeTheJobIsSeenDone(t *testing.T) {
 		}
 		return
 	}
+}
+
+// A Trial run's script test grants the PR tree it is given, as well as the
+// script: the Mac fetches both for the test.
+func TestATrialTestGrantsItsPRTree(t *testing.T) {
+	script, tree := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	test := api.TestSpec{Name: "t", Script: script, Trial: true, PR: &api.PRTree{Repo: "r", Commit: "c", Archive: tree}}
+	for _, c := range []api.Command{
+		{Kind: api.CmdRunTest, JobID: "j", Args: mustJSON(t, test)},
+		{Kind: api.CmdBootOnce, JobID: "j", Args: mustJSON(t, api.BootOnceArgs{Tests: []api.TestSpec{test}})},
+	} {
+		got := artifactsIn(c)
+		if !slices.Contains(got, script) || !slices.Contains(got, tree) {
+			t.Errorf("%s grants %v, want the script %s and the PR tree %s", c.Kind, got, script[:8], tree[:8])
+		}
+	}
+}
+
+func mustJSON(t *testing.T, v any) json.RawMessage {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
