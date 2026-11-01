@@ -212,12 +212,18 @@ func TestBootDigestCoversASeparateBoot(t *testing.T) {
 	boot := t.TempDir()
 	writeFile(t, filepath.Join(boot, "vmlinuz-linux-asahi"), "kernel")
 	writeFile(t, filepath.Join(boot, "initramfs-linux-asahi.img"), "initramfs")
+	writeFile(t, filepath.Join(boot, "omarchy", "encrypt.log"), "boot 1\n")
 	before, err := bootDigest(boot)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if again, _ := bootDigest(boot); again != before {
 		t.Error("the /boot digest is not stable")
+	}
+	// Omarchy's initramfs logs every boot to /boot, a Trial boot's too
+	writeFile(t, filepath.Join(boot, "omarchy", "encrypt.log"), "boot 1\nboot 2\n")
+	if again, _ := bootDigest(boot); again != before {
+		t.Error("the /boot digest changed with a boot's log line")
 	}
 	writeFile(t, filepath.Join(boot, "initramfs-linux-asahi.img"), "initramfs 2")
 	if after, _ := bootDigest(boot); after == before {

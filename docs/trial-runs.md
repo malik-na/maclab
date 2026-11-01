@@ -108,6 +108,11 @@ fingerprint check catches the paths it covers, not every byte. Lab Macs are
 Omacom people's, and a script needs Access level Full on a Volunteer's Mac
 as before; isolating a hostile script is not a goal of this change.
 
+The initramfs runs before the Trial fstab applies, and is the own system's:
+whatever it writes, it writes to the real disk. Omarchy's appends a line to
+`/boot/omarchy/encrypt.log` (on the separate `/boot`) on every boot, Trial
+boots included, so the `/boot` fingerprint leaves out `*.log` files.
+
 `/var/log` and `/var/lib/maclab` are shared, so a test's logs and the lab's
 own records are kept. Trial copies of `@home` and the rest are thrown away
 with `@`.

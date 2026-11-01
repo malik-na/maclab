@@ -552,10 +552,12 @@ func espDigest(lim *limineLayout) (string, error) {
 	})
 }
 
-// bootDigest hashes every regular file on a separate /boot filesystem. It
-// stays on that filesystem: an ESP mounted inside it (/boot/efi) is
-// espDigest's. Nothing else is skipped; a Trial run doesn't mount /boot, and
-// nothing on it changes across a plain reboot.
+// bootDigest hashes every regular file on a separate /boot filesystem but its
+// logs (*.log). It stays on that filesystem: an ESP mounted inside it
+// (/boot/efi) is espDigest's. A Trial run doesn't mount /boot, but the
+// initramfs runs before any fstab and may log there: Omarchy's appends to
+// /boot/omarchy/encrypt.log on every boot, Trial or not (seen on an M1 Air).
+// A log is not the boot setup.
 func bootDigest(dir string) (string, error) {
 	var st unix.Stat_t
 	if err := unix.Stat(dir, &st); err != nil {
@@ -563,7 +565,10 @@ func bootDigest(dir string) (string, error) {
 	}
 	dev := st.Dev
 	return treeDigest(dir, func(p string, d fs.DirEntry) bool {
-		if !d.IsDir() || p == dir {
+		if !d.IsDir() {
+			return strings.HasSuffix(d.Name(), ".log")
+		}
+		if p == dir {
 			return false
 		}
 		var s unix.Stat_t
