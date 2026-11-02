@@ -162,11 +162,11 @@ func (v *dev) setStateLocked(st api.DeviceState, reason string) {
 	if v.d.State == api.StateLeft {
 		return
 	}
-	// A Mac whose own system was not checked after a Trial run stays out of
-	// the pool however it comes back: a job ending, a check-in after being
-	// offline or needing hands, a labd restart.
-	if st == api.StateReady && v.d.TrialUnchecked != "" {
-		st, reason = api.StateNew, v.d.TrialUnchecked
+	// A Mac a Trial run left changed or unchecked stays out of the pool
+	// however it comes back: a job ending, a check-in after being offline or
+	// needing hands, a labd restart.
+	if v.d.TrialHold != "" && (st == api.StateReady || (st == api.StateNew && reason == "")) {
+		st, reason = api.StateNew, v.d.TrialHold
 		if v.d.State == st && v.d.StateReason == reason {
 			return
 		}
@@ -182,7 +182,7 @@ func (v *dev) setStateLocked(st api.DeviceState, reason string) {
 
 // idleState is where a device goes when nothing is happening to it.
 func (v *dev) idleStateLocked() api.DeviceState {
-	if v.d.KnownGood == "" {
+	if v.d.KnownGood == "" || v.d.TrialHold != "" {
 		return api.StateNew
 	}
 	return api.StateReady

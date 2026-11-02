@@ -335,7 +335,7 @@ func (r *jobRun) trialAfter(ctx context.Context, outcome, summary string) (strin
 	}
 	why := "own system changed during Trial run " + r.j.ID + ": " + strings.Join(changed, ", ")
 	r.ev("%s", why)
-	r.v.setState(api.StateNew, why+"; a Maintainer must look before it runs again")
+	r.v.holdForTrial(why)
 	return api.OutcomeInfra, summary + "; " + why + ". The Mac is out of the pool"
 }
 
@@ -371,15 +371,22 @@ func (r *jobRun) trialUnchecked(outcome, summary, why string) (string, string) {
 	return outcome, summary + "; the own system was not checked after the Trial run (" + why + "). The Mac is out of the pool"
 }
 
-// markTrialUnchecked records, in the stored device, that job's Trial run left
-// the own system unchecked (why says why), and takes the Mac out of the pool:
-// now, or, for a Mac offline or needing hands, whenever it is back (see
-// setStateLocked). It returns the reason the Mac's state gives.
+// markTrialUnchecked holds the Mac (holdForTrial) because job's Trial run
+// left its own system unchecked; why says why. It returns the hold's reason.
 func (v *dev) markTrialUnchecked(job, why string) string {
-	reason := "own system not checked after Trial run " + job + " (" + why + "); a Maintainer must look, and lab baseline put it back, before it runs again"
+	return v.holdForTrial("own system not checked after Trial run " + job + " (" + why + ")")
+}
+
+// holdForTrial records, in the stored device, why a Trial run left the Mac's
+// own system not known to be as it was, and takes the Mac out of the pool:
+// now, or, for a Mac offline or needing hands, whenever it is back (see
+// setStateLocked). It runs no job but a baseline until one passes. It
+// returns the reason the Mac's state gives.
+func (v *dev) holdForTrial(why string) string {
+	reason := why + "; a Maintainer must look, and a passing lab baseline put it back, before it runs anything else"
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	v.d.TrialUnchecked = reason
+	v.d.TrialHold = reason
 	switch v.d.State {
 	case api.StateNeedsHands, api.StateOffline, api.StateLeft:
 		v.saveLocked()

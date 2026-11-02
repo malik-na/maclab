@@ -136,8 +136,8 @@ func TestTrialRunNotCheckedAfterwardsStaysOutOfThePool(t *testing.T) {
 	v.setStateLocked(api.StateNeedsHands, "power cycle it")
 	v.mu.Unlock()
 	reason := v.markTrialUnchecked("j1", "it was not back on it")
-	if d := v.snapshot(); d.State != api.StateNeedsHands || d.TrialUnchecked != reason {
-		t.Fatalf("a Mac that needs hands is %s (mark %q)", d.State, d.TrialUnchecked)
+	if d := v.snapshot(); d.State != api.StateNeedsHands || d.TrialHold != reason {
+		t.Fatalf("a Mac that needs hands is %s (mark %q)", d.State, d.TrialHold)
 	}
 	// its next check-in brings it back, as from any power cycle
 	d := l.waitDevice(func(d api.Device) bool { return d.State != api.StateNeedsHands })
@@ -152,8 +152,8 @@ func TestTrialRunNotCheckedAfterwardsStaysOutOfThePool(t *testing.T) {
 		t.Fatalf("after a job an unchecked Mac is %s", d.State)
 	}
 	l.baseline()
-	if d := l.waitDevice(func(d api.Device) bool { return d.State == api.StateReady }); d.TrialUnchecked != "" {
-		t.Errorf("a passing baseline left the mark: %q", d.TrialUnchecked)
+	if d := l.waitDevice(func(d api.Device) bool { return d.State == api.StateReady }); d.TrialHold != "" {
+		t.Errorf("a passing baseline left the mark: %q", d.TrialHold)
 	}
 }
 
@@ -188,7 +188,7 @@ func TestLabdRestartMidTrialRunLeavesTheMacUnchecked(t *testing.T) {
 		t.Fatalf("job after restart: %+v %v", got, err)
 	}
 	v := s2.dev("m1")
-	if !strings.Contains(v.snapshot().TrialUnchecked, job) {
+	if !strings.Contains(v.snapshot().TrialHold, job) {
 		t.Fatalf("no unchecked mark after the restart: %+v", v.snapshot())
 	}
 	// it checks in again: not ready
@@ -202,7 +202,7 @@ func TestLabdRestartMidTrialRunLeavesTheMacUnchecked(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m := s3.dev("m1").snapshot().TrialUnchecked; !strings.Contains(m, job) {
+	if m := s3.dev("m1").snapshot().TrialHold; !strings.Contains(m, job) {
 		t.Errorf("the mark did not survive another restart: %q", m)
 	}
 }
@@ -375,4 +375,78 @@ func TestArchiveCommitIsCapped(t *testing.T) {
 	if _, _, err := l.s.archiveCommit(context.Background(), repo, string(bytes.TrimSpace(head))); err == nil || !strings.Contains(err.Error(), "more than") {
 		t.Fatalf("an oversized tree: %v", err)
 	}
+}
+
+// A Mac a Trial run left changed runs no job but the baseline that puts it
+// back: a submit is refused, and a job queued before the hold is refused when
+// its turn comes, so the baseline isn't stuck behind it.
+func TestHeldMacRunsOnlyItsBaseline(t *testing.T) {
+	l := newLab(t, true)
+	l.baseline()
+	l.sim.SetTrialLeak(true)
+	l.expect(l.run(api.JobSpec{Trial: true, Tests: []api.TestSpec{l.trialScript("migrate")}}), api.OutcomeInfra)
+	l.sim.SetTrialLeak(false)
+	if _, _, err := l.s.Submit(api.JobSpec{Device: l.name, Trial: true, Tests: []api.TestSpec{l.trialScript("again")}}); err == nil || !strings.Contains(err.Error(), "held after a Trial run") {
+		t.Fatalf("a held Mac took a Trial job: %v", err)
+	}
+	if _, _, err := l.s.Submit(api.JobSpec{Device: l.name, Kernel: l.artifact("krel=7.2-held behavior=ok")}); err == nil {
+		t.Fatal("a held Mac took a kernel job")
+	}
+	l.baseline()
+	if d := l.s.dev(l.name).snapshot(); d.TrialHold != "" || d.State != api.StateReady {
+		t.Fatalf("after a passing baseline: %s, hold %q", d.State, d.TrialHold)
+	}
+
+	// queued while the Mac is away, held before its turn
+	go l.sim.Quiet(4 * time.Second)
+	l.waitDevice(func(d api.Device) bool { return time.Since(d.LastSeen) > 2*aliveWindow })
+	j, _, err := l.s.Submit(api.JobSpec{Device: l.name, Kernel: l.artifact("krel=7.2-queued behavior=ok")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.s.dev(l.name).holdForTrial("own system changed during Trial run j0: packages")
+	got := l.wait(j.ID, 60*time.Second)
+	if got.Outcome != api.OutcomeCanceled || !strings.Contains(got.Summary, "held after a Trial run") || got.Result.Booted {
+		t.Fatalf("a job queued before the hold: %s %q", got.Outcome, got.Summary)
+	}
+	l.baseline()
+}
+
+// "Own system changed" is stored like "not checked": needing hands and a
+// check-in, a labd restart, and leaving and rejoining the lab all bring the
+// Mac back new, held, with the reason.
+func TestOwnSystemChangedHoldSurvivesWhatBringsTheMacBack(t *testing.T) {
+	l := newLab(t, true)
+	l.baseline()
+	l.sim.SetTrialLeak(true)
+	l.expect(l.run(api.JobSpec{Trial: true, Tests: []api.TestSpec{l.trialScript("migrate")}}), api.OutcomeInfra)
+	held := func(when string, d api.Device) {
+		t.Helper()
+		if d.State != api.StateNew || !strings.Contains(d.TrialHold, "own system changed") || !strings.Contains(d.StateReason, "own system changed") {
+			t.Fatalf("%s: %s (%q), hold %q", when, d.State, d.StateReason, d.TrialHold)
+		}
+	}
+	v := l.s.dev(l.name)
+	held("after the run", v.snapshot())
+
+	v.mu.Lock()
+	v.setStateLocked(api.StateNeedsHands, "power cycle it")
+	v.mu.Unlock()
+	held("back from needing hands", l.waitDevice(func(d api.Device) bool { return d.State != api.StateNeedsHands }))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s2, err := New(ctx, l.s.cfg, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h := s2.dev(l.name).snapshot().TrialHold; !strings.Contains(h, "own system changed") {
+		t.Fatalf("after a labd restart the hold is %q", h)
+	}
+
+	l.leaveAgent(false)
+	if resp := l.leaveAgent(true); !resp.Back {
+		t.Fatalf("undo: %+v", resp)
+	}
+	held("after leaving and rejoining", v.snapshot())
 }

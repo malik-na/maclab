@@ -185,6 +185,13 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 		r.finish(api.OutcomeCanceled, "canceled: "+why)
 		return
 	}
+	// A Mac a Trial run left changed or unchecked runs only the baseline that
+	// puts it back; a job queued before that is refused, not held, so the
+	// baseline is not stuck behind it.
+	if hold := v.snapshot().TrialHold; hold != "" && !j.Spec.Baseline {
+		r.finish(api.OutcomeCanceled, "refused: "+j.Spec.Device+" is held after a Trial run: "+hold+". Only lab baseline runs on it now")
+		return
+	}
 
 	if j.Spec.Mesa != nil {
 		if _, err := s.validateMesa(j.Spec, v.snapshot()); err != nil {
@@ -290,7 +297,7 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 	if j.Spec.Baseline && outcome == api.OutcomePass {
 		v.mu.Lock()
 		v.d.KnownGood = v.d.Kernel
-		v.d.TrialUnchecked = "" // a Maintainer looked: the baseline vouches for the Mac again
+		v.d.TrialHold = "" // a Maintainer looked: the baseline vouches for the Mac again
 		v.saveLocked()
 		v.mu.Unlock()
 		summary += fmt.Sprintf(". %s is in the pool (known-good kernel %s)", j.Spec.Device, v.snapshot().Kernel)

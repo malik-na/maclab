@@ -95,10 +95,12 @@ runs on a copy of it.
    failed restore still gets the check when the Mac is back on its own
    system anyway (only its cleanup failed, say). When it is not, or the
    check can't run, or labd restarted during the run, the job says the own
-   system was not checked and the Mac goes to `new` too. The mark is stored
-   with the device (`trial_unchecked`), so the Mac comes back `new` however
-   it comes back (offline, needing hands, a labd restart, a job ending)
-   until a passing `lab baseline` clears it.
+   system was not checked and the Mac goes to `new` too. Either way the
+   Mac is held: the reason is stored with the device (`trial_hold`), so it
+   comes back `new` however it comes back (offline, needing hands, a labd
+   restart, a job ending, leaving and rejoining the lab), and it runs no
+   job but `lab baseline`. A submit is refused, and a job queued before the
+   hold is refused when its turn comes. A passing baseline clears the hold.
 
 ## What this does and does not protect against
 
