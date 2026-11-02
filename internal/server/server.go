@@ -285,9 +285,10 @@ func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
 			}
 		}
 		j.State, j.Outcome, j.Summary = api.JobDone, api.OutcomeInfra, "labd restarted while the job was running"
-		if v := s.devs[j.Spec.Device]; v != nil && trialInterrupted(j) {
-			why := v.markTrialUnchecked(j.ID, "labd restarted during it")
-			j.Summary += "; " + why
+		if v := s.devs[j.Spec.Device]; v != nil {
+			if why := trialInterruptedHold(j); why != "" {
+				j.Summary += "; " + v.holdForTrial(why)
+			}
 		}
 		st.saveJob(j)
 	}
@@ -1685,8 +1686,8 @@ func (s *Server) submit(maintainer string, spec api.JobSpec, retryOf string, not
 	if d.State == api.StateLeft {
 		return nil, 409, fmt.Errorf("%s left the lab (lab-agent uninstall): `lab forget %s` takes it off the list", d.Name, d.Name)
 	}
-	if d.TrialHold != "" && !spec.Baseline {
-		return nil, 409, fmt.Errorf("%s is held after a Trial run: %s. Only `lab baseline %s` runs on it now", d.Name, d.TrialHold, d.Name)
+	if d.TrialHold != "" && !clearsTrialHold(spec, s.now(), retryOf, d.TrialHoldSince) {
+		return nil, 409, fmt.Errorf("%s is held after a Trial run: %s. Only a new `lab baseline %s` (not a retry) runs on it now", d.Name, d.TrialHold, d.Name)
 	}
 	if spec.CmdlineBase != "" || len(spec.CmdlineStrip) > 0 {
 		if spec.Baseline || spec.Crash != "" {

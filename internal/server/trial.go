@@ -386,7 +386,7 @@ func (v *dev) holdForTrial(why string) string {
 	reason := why + "; a Maintainer must look, and a passing lab baseline put it back, before it runs anything else"
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	v.d.TrialHold = reason
+	v.d.TrialHold, v.d.TrialHoldSince = reason, v.s.now()
 	switch v.d.State {
 	case api.StateNeedsHands, api.StateOffline, api.StateLeft:
 		v.saveLocked()
@@ -396,9 +396,28 @@ func (v *dev) holdForTrial(why string) string {
 	return reason
 }
 
-// trialInterrupted is whether job j, which labd stopped running, was a Trial
-// run that may have touched the Mac and never checked its own system after.
-func trialInterrupted(j *api.Job) bool {
+// clearsTrialHold is whether job j (a spec, its creation time and the job it
+// retries, if any) may run on, and clear, a hold set at since: a baseline a
+// Maintainer submitted after the hold. A baseline queued before it (behind
+// the Trial run, say) or a retry, by labd or lab retry, was not asked for by
+// anyone who knew of the hold.
+func clearsTrialHold(spec api.JobSpec, created time.Time, retryOf string, since time.Time) bool {
+	return spec.Baseline && retryOf == "" && created.After(since)
+}
+
+// trialInterruptedHold is why the Mac must be held for job j, which labd
+// stopped running, or "": a Trial run that may have touched the Mac and
+// either never checked its own system after, or found it changed but may not
+// have held it yet.
+func trialInterruptedHold(j *api.Job) string {
 	tr := j.Result.Trial
-	return j.Spec.Trial && tr != nil && tr.Before != nil && tr.After == nil
+	switch {
+	case !j.Spec.Trial || tr == nil || tr.Before == nil:
+		return ""
+	case tr.After == nil:
+		return "own system not checked after Trial run " + j.ID + " (labd restarted during it)"
+	case !tr.Unchanged:
+		return "own system changed during Trial run " + j.ID + ": " + strings.Join(tr.Changed, ", ")
+	}
+	return ""
 }

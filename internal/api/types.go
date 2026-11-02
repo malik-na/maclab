@@ -100,6 +100,9 @@ type Device struct {
 	// passing lab baseline clears it, the Mac is never ready, whatever
 	// brings it back, and runs no job but that baseline.
 	TrialHold string `json:"trial_hold,omitempty"`
+	// TrialHoldSince is when TrialHold was set: only a baseline a Maintainer
+	// submitted after it (not a retry) may clear it.
+	TrialHoldSince time.Time `json:"trial_hold_since,omitzero"`
 
 	// VolunteeredBy is the tailnet login whose ./volunteer token enrolled the
 	// Mac, lowercased; empty for a token an admin asked for. It counts toward

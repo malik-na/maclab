@@ -99,8 +99,12 @@ runs on a copy of it.
    Mac is held: the reason is stored with the device (`trial_hold`), so it
    comes back `new` however it comes back (offline, needing hands, a labd
    restart, a job ending, leaving and rejoining the lab), and it runs no
-   job but `lab baseline`. A submit is refused, and a job queued before the
-   hold is refused when its turn comes. A passing baseline clears the hold.
+   job but a `lab baseline` a Maintainer submits after the hold
+   (`trial_hold_since`). Any other submit is refused, including a retry,
+   and any job queued before the hold, a baseline among them, is refused
+   when its turn comes. Such a baseline passing clears the hold. A labd
+   restart holds the Mac when the interrupted run had no after-check, or
+   saved one that found a change.
 
 ## What this does and does not protect against
 
