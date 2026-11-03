@@ -53,6 +53,14 @@ func (l *Linux) RunTest(ctx context.Context, job string, t api.TestSpec, fetch F
 		return suspendDevices(ctx, t, outDir, l.GUIUser, quiet)
 	}
 
+	var prEnv []string
+	if t.PR != nil {
+		dir, err := l.unpackPR(ctx, job, *t.PR, fetch)
+		if err != nil {
+			return fail(err)
+		}
+		prEnv = []string{"MACLAB_PR_DIR=" + dir, "MACLAB_PR_REPO=" + t.PR.Repo, "MACLAB_PR_REF=" + t.PR.Ref, "MACLAB_PR_COMMIT=" + t.PR.Commit}
+	}
 	script := filepath.Join(l.jobDir(job), "test-"+t.Name+".sh")
 	os.MkdirAll(filepath.Dir(script), 0o755)
 	switch {
@@ -90,7 +98,7 @@ func (l *Linux) RunTest(ctx context.Context, job string, t api.TestSpec, fetch F
 	if t.SkipOnScreen {
 		skip += "1"
 	}
-	env = append(env, skip)
+	env = append(append(env, skip), prEnv...)
 	var cmd *exec.Cmd
 	var gui *guiTestWorkspace
 	if t.GUI {
@@ -106,7 +114,7 @@ func (l *Linux) RunTest(ctx context.Context, job string, t api.TestSpec, fetch F
 			return fail(fmt.Errorf("GUI workspace: %w", err))
 		}
 		defer gui.close()
-		args := append([]string{"-u", u.Username, "--", "env"}, append(genv, "MACLAB_OUT="+gui.outputPath(), "MACLAB_JOB="+job, "MACLAB_TEST="+t.Name, skip, "bash", gui.scriptPath())...)
+		args := append([]string{"-u", u.Username, "--", "env"}, append(append(append(genv, "MACLAB_OUT="+gui.outputPath(), "MACLAB_JOB="+job, "MACLAB_TEST="+t.Name, skip), prEnv...), "bash", gui.scriptPath())...)
 		cmd = exec.CommandContext(tctx, "runuser", args...)
 		cmd.Dir = gui.dir
 	} else {

@@ -72,12 +72,12 @@ func artifactsIn(c api.Command) []string {
 	case api.CmdRunTest:
 		var t api.TestSpec
 		json.Unmarshal(c.Args, &t)
-		shas = append(shas, t.Script)
+		shas = append(shas, testArtifacts(t)...)
 	case api.CmdBootOnce:
 		var a api.BootOnceArgs
 		json.Unmarshal(c.Args, &a)
 		for _, t := range a.Tests {
-			shas = append(shas, t.Script)
+			shas = append(shas, testArtifacts(t)...)
 		}
 	case api.CmdInstall:
 		var a api.InstallArgs
@@ -91,6 +91,16 @@ func artifactsIn(c api.Command) []string {
 		shas = append(shas, mesaRefs(api.JobSpec{Mesa: &a.Spec})...)
 	}
 	return slices.DeleteFunc(shas, func(sha string) bool { return !reSHA.MatchString(sha) })
+}
+
+// testArtifacts are the artifacts test t has the Mac fetch: its script, and
+// the PR tree a Trial run's script is given.
+func testArtifacts(t api.TestSpec) []string {
+	shas := []string{t.Script}
+	if t.PR != nil {
+		shas = append(shas, t.PR.Archive)
+	}
+	return shas
 }
 
 // endJobLocked ends the Mac's authority over job: it is no longer the Mac's

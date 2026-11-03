@@ -302,6 +302,11 @@ func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
 			}
 		}
 		j.State, j.Outcome, j.Summary = api.JobDone, api.OutcomeInfra, "labd restarted while the job was running"
+		if v := s.devs[j.Spec.Device]; v != nil {
+			if why := trialInterruptedHold(j); why != "" {
+				j.Summary += "; " + v.holdForTrial(why)
+			}
+		}
 		st.saveJob(j)
 	}
 	s.builds = newBuildMgr(s)
@@ -1683,6 +1688,9 @@ func (s *Server) submit(maintainer string, spec api.JobSpec, retryOf string, not
 			return nil, 400, fmt.Errorf("test name %q must be non-empty with no slashes or spaces", t.Name)
 		}
 	}
+	if err := validatePR(spec, retryOf); err != nil {
+		return nil, 400, err
+	}
 	if why := needsFull(spec); why != "" {
 		if err := s.mayDo(callerFor(maintainer), v, actScript(why)); err != nil {
 			return nil, 403, err
@@ -1694,6 +1702,9 @@ func (s *Server) submit(maintainer string, spec api.JobSpec, retryOf string, not
 	d := s.view(v)
 	if d.State == api.StateLeft {
 		return nil, 409, fmt.Errorf("%s left the lab (lab-agent uninstall): `lab forget %s` takes it off the list", d.Name, d.Name)
+	}
+	if d.TrialHold != "" && !clearsTrialHold(spec, s.now(), retryOf, d.TrialHoldSince) {
+		return nil, 409, fmt.Errorf("%s is held after a Trial run: %s. Only a new `lab baseline %s` (not a retry) runs on it now", d.Name, d.TrialHold, d.Name)
 	}
 	if spec.CmdlineBase != "" || len(spec.CmdlineStrip) > 0 {
 		if spec.Baseline || spec.Crash != "" {
@@ -1746,6 +1757,13 @@ func (s *Server) submit(maintainer string, spec api.JobSpec, retryOf string, not
 	if spec.Mesa != nil {
 		if code, err := s.validateMesa(spec, d.Device); err != nil {
 			return nil, code, err
+		}
+	}
+	// a PR that turns out to be a kernel needs none of this, but which it is
+	// takes a fetch: refuse a PR only when it is known to be userspace
+	if spec.Trial || spec.PRKind == api.PRUserspace {
+		if err := trialAdmission(d.Device); err != nil {
+			return nil, 409, err
 		}
 	}
 	v.mu.Lock()

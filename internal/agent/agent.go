@@ -29,7 +29,7 @@ import (
 	"github.com/iconidentify/maclab/internal/labhttp"
 )
 
-const Version = "0.8.0"
+const Version = "0.9.0"
 
 type Config struct {
 	Server   string `json:"server"`
@@ -958,6 +958,9 @@ func (a *Agent) exec(ctx context.Context, c api.Command) (any, *afterAck, error)
 		if err := json.Unmarshal(c.Args, &t); err != nil {
 			return nil, nil, err
 		}
+		if err := checkTrialTest(t, c.JobID, a.sys.RunningTrial()); err != nil {
+			return nil, nil, err
+		}
 		dir, err := a.outDir(c)
 		if err != nil {
 			return nil, nil, err
@@ -1018,6 +1021,9 @@ func (a *Agent) exec(ctx context.Context, c api.Command) (any, *afterAck, error)
 			return nil, nil, err
 		}
 		return a.collectLost(ctx, c.JobID, dir), nil, nil
+	case api.CmdOwnSystem:
+		o, err := a.sys.OwnSystem()
+		return o, nil, err
 	case api.CmdCleanup:
 		var args api.CleanupArgs
 		_ = json.Unmarshal(c.Args, &args)

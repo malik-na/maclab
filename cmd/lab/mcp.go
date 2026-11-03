@@ -78,11 +78,15 @@ func serveMCP(ctx context.Context) error {
 		OMTAllow          []string      `json:"omt_allow,omitempty" jsonschema:"omarchy-m-test checks this kernel is expected to fail; hardware.drivers:<compatible> allows one unbound node"`
 		Publish           bool          `json:"publish,omitempty" jsonschema:"publish the omarchy-m-test report to omarchy-m-testing.org; only runs on the Mac's known-good kernel qualify"`
 		WaitSec           int           `json:"wait_sec,omitempty" jsonschema:"wait up to this long for the result (max 900); 0 returns once queued"`
+		PR                string        `json:"pr,omitempty" jsonschema:"test any pull request, branch or commit (GitHub PR URL, repo#ref): a kernel tree is built and booted; anything else is applied and tested by scripts in a Trial system, with the tree in $MACLAB_PR_DIR"`
+		PRKind            string        `json:"pr_kind,omitempty" jsonschema:"kernel or userspace, instead of deciding by the tree"`
+		Trial             bool          `json:"trial,omitempty" jsonschema:"run scripts in a Trial system: a throwaway snapshot of the Mac's own system, which is checked unchanged afterwards"`
 	}
-	mcp.AddTool(s, &mcp.Tool{Name: "lab_run", Description: "Boot a kernel on a Mac once and run tests. Give source (a GitHub URL) to build it first, or a kernel artifact. Returns the job; use lab_wait for the result."},
+	mcp.AddTool(s, &mcp.Tool{Name: "lab_run", Description: "Boot a kernel on a Mac once and run tests. Give source (a GitHub URL) to build it first, or a kernel artifact; or give pr to test any PR (kernel or userspace, which runs in a throwaway Trial system). Returns the job; use lab_wait for the result."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, a runArg) (*mcp.CallToolResult, any, error) {
 			spec := api.JobSpec{Device: a.Device, Kernel: a.KernelSHA256, Source: a.Source, Cmdline: a.Cmdline, BootTimeoutSec: a.BootTimeoutSec, Holder: who, Publish: a.Publish, OMTAllow: a.OMTAllow,
-				CmdlineBase: a.CmdlineBase, CmdlineStrip: a.CmdlineStrip, VerboseBoot: a.VerboseBoot, InstalledManifest: a.InstalledManifest, Mesa: a.Mesa}
+				CmdlineBase: a.CmdlineBase, CmdlineStrip: a.CmdlineStrip, VerboseBoot: a.VerboseBoot, InstalledManifest: a.InstalledManifest, Mesa: a.Mesa,
+				PR: a.PR, PRKind: a.PRKind, Trial: a.Trial}
 			if spec.Mesa != nil && spec.Mesa.Mode == "" {
 				spec.Mesa.Mode = api.MesaStaged
 			}

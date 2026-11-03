@@ -138,6 +138,10 @@ func describe(c api.Command) string {
 		switch {
 		case t.Script != "" && t.GUI:
 			return fmt.Sprintf("test %s: a Maintainer's script in your desktop session (--gui-script %s)", t.Name, short(t.Script))
+		case t.Script != "" && t.PR != nil:
+			return fmt.Sprintf("test %s: a Maintainer's script as root in a Trial system, on %s at %s (--script %s)", t.Name, t.PR.Repo, short(t.PR.Commit), short(t.Script))
+		case t.Script != "" && t.Trial:
+			return fmt.Sprintf("test %s: a Maintainer's script as root in a Trial system (--script %s)", t.Name, short(t.Script))
 		case t.Script != "":
 			return fmt.Sprintf("test %s: a Maintainer's script as root (--script %s)", t.Name, short(t.Script))
 		case t.Builtin != "":
@@ -151,6 +155,9 @@ func describe(c api.Command) string {
 		_ = json.Unmarshal(c.Args, &s)
 		if s.Installed != nil {
 			return "stage installed Release " + s.Installed.Release + " for a Lab boot"
+		}
+		if s.Trial {
+			return "stage the known-good kernel for a Lab boot from a Trial system (a throwaway snapshot of this Mac's system)"
 		}
 		if s.Artifact == "" {
 			return "stage the known-good kernel for a Lab boot"
@@ -183,7 +190,9 @@ func describe(c api.Command) string {
 	case api.CmdCollect, api.CmdCollectLost:
 		return "collect logs"
 	case api.CmdCleanup:
-		return "remove staged lab kernels"
+		return "remove staged lab kernels and Trial systems"
+	case api.CmdOwnSystem:
+		return "read a fingerprint of this Mac's own system (packages, boot files), read-only"
 	case api.CmdConfig:
 		return "read the running kernel's config"
 	case api.CmdInstall:

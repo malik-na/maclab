@@ -83,6 +83,9 @@ func (s *Server) gcArtifacts() {
 		for _, t := range j.Spec.Tests {
 			refs = append(refs, t.Script)
 		}
+		if j.Result.PR != nil {
+			refs = append(refs, j.Result.PR.Archive)
+		}
 		for _, r := range refs {
 			if r == "" {
 				continue

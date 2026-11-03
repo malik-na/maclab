@@ -51,7 +51,8 @@ FaultNames == {
     "CrashInTest",        \* the test kernel panics during the test
     "CrashBeforeTest",    \* the test kernel panics after reaching labd, before the test
     "CrashAfterTests",    \* ... or after its test, before labd has its logs
-    "Cancel"}             \* a Maintainer cancels the job while labd waits on the Mac
+    "Cancel",             \* a Maintainer cancels the job while labd waits on the Mac
+    "NotTrialRoot"}       \* a Trial run's Lab boot is up, but not from its Trial system
 
 BugNames == {
     "NoRearm",            \* 18b9311: no re-arm before the report or the reboot
@@ -264,16 +265,21 @@ NeverRebooted == neverLeft /\ "NeverLeftIsHung" \notin Bugs
 
 \* The Mac is back after the arm (runner.go execute): on the test entry,
 \* take the after-boot screenshot, then run the test; fell back, ask
-\* collect_lost how the Lab boot ended.
+\* collect_lost how the Lab boot ended. A Trial run's Lab boot whose cmdline
+\* doesn't mount its Trial system runs no test: that is the lab's failure,
+\* and labd restores (NotTrialRoot).
 \* Assigns cmd, cmdLost, lphase, wdl, rdl, waitFrom, outcome, ladderUsed.
 JudgeBoot ==
     IF labdTag = "Test"
-      THEN /\ cmd' = [kind |-> "capture", target |-> labdBoot]
-           /\ cmdLost' = FALSE
-           /\ lphase' = "capture"
-           /\ waitFrom' = labdBoot
-           /\ ladderUsed' = FALSE
-           /\ UNCHANGED <<wdl, rdl, outcome, neverLeft>>
+      THEN \/ /\ cmd' = [kind |-> "capture", target |-> labdBoot]
+              /\ cmdLost' = FALSE
+              /\ lphase' = "capture"
+              /\ waitFrom' = labdBoot
+              /\ ladderUsed' = FALSE
+              /\ UNCHANGED <<wdl, rdl, outcome, neverLeft>>
+           \/ /\ "NotTrialRoot" \in Faults
+              /\ EnterRestore("infra_error")
+              /\ UNCHANGED <<cmd, cmdLost, ladderUsed, neverLeft>>
       ELSE /\ EnterRestore(IF NeverRebooted THEN "infra_error"
                            ELSE IF seen \in Deadlines THEN "lost_contact"
                            ELSE IF ladderUsed THEN "hung"
@@ -1083,5 +1089,7 @@ NoInfra       == outcome /= "infra_error"
 NoAgentFailed == armVerdict /= "agent_failed"
 NoNeverLeft   == ~(neverLeft /\ outcome = "infra_error")
 NoRepair      == ~(blockDropped /\ outcome = "pass")
+\* the test kernel booted, and labd called it the lab's failure before any test
+NoTestlessInfra == ~(testBooted /\ testStart = 0 /\ outcome = "infra_error")
 
 =============================================================================

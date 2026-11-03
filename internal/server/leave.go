@@ -102,6 +102,9 @@ func (s *Server) rejoin(v *dev, why string) (bool, error) {
 	// setStateLocked keeps a Mac that left where it is: this is the way out.
 	v.leftBy = ""
 	v.d.State, v.d.StateReason, v.d.Action = v.idleStateLocked(), "", nil
+	if v.d.TrialHold != "" {
+		v.d.StateReason = v.d.TrialHold // still held: only a passing baseline puts it back
+	}
 	v.saveLocked()
 	v.publishLocked()
 	v.bump()
