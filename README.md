@@ -648,7 +648,11 @@ a commit with `git ls-remote`. It keys the build on that commit, the target Mac'
 
 `lab-builder` runs on the controller Mac as a root LaunchDaemon. Root is needed because macOS Local
 Network privacy blocks user processes. It runs `builder/kbuild` in an Apple `container` micro-VM
-(`builder/Containerfile`: Debian, gcc, Rust 1.93.1, bindgen), started in the user's session. All
+(`builder/Containerfile`: Debian, gcc, clang, LLD, Rust 1.93.1, bindgen), started in the user's
+session. A config with `CONFIG_CC_IS_CLANG=y` (linux-aurora's: clang 18 + LLD) is built with
+`LLVM=1`, any other with gcc; the log's `toolchain:` line says which. Debian's clang is 19, not
+18. After `olddefconfig`, a `config:` warning lists every `=y`/`=m` option the build dropped and
+any `CC_IS_*`, `LD_IS_*` or `AS_IS_*` change. All
 state is one size-capped volume (`container volume create -s 40G maclab-cache`): one shared
 depth-1 git store, one reused worktree, at most two build dirs, and an 8 GB ccache. The host scratch
 dir is emptied after every build. labd's artifact store is garbage-collected to a budget
@@ -777,6 +781,8 @@ answered yes. The run takes 1 to 3 minutes.
 labd --omt-publish --omt-every 24h   # refresh each idle Mac's known-good report daily, and publish it
 labd --omt=false                     # don't add it to jobs
 ```
+
+The Kubernetes cloud manifests enable `--omt-publish`. Once deployed, eligible baseline jobs upload automatically. An ordinary known-good `lab run` remains manual. Volunteer consent, package identity, and the candidate refusal are unchanged. `--omt-every` is not set, so there is no scheduled reboot and no backfill of stored reports. `deploy/labd.service` does not pass the flag.
 
 ## Release packages from a PKGBUILD
 

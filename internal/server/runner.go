@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/iconidentify/maclab/internal/agent"
 	"github.com/iconidentify/maclab/internal/api"
 	"github.com/iconidentify/maclab/internal/detect"
 	"github.com/iconidentify/maclab/internal/installed"
@@ -23,7 +24,11 @@ type jobRun struct {
 	j       *api.Job
 	boot    time.Duration
 	started time.Time
-	serial0 int64
+	// testStarted and testLimit are the running test's start and labd's
+	// timeout for it, for how long lab-agent's watchdog feeds it.
+	testStarted time.Time
+	testLimit   time.Duration
+	serial0     int64
 
 	bootID   string // the test kernel's boot, once it is up
 	bootedAt time.Time
@@ -269,7 +274,8 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 	// Always put the Mac back on its known-good kernel, even after a cancel,
 	// unless it is leaving the lab: its agent is stopping, so a restore would
 	// only time out and walk the recovery ladder.
-	rctx, cancel := s.withTimeout(s.ctx, 3*r.boot+5*time.Minute)
+	// On a Mac with no hard reset, restore may wait out the agent's watchdog.
+	rctx, cancel := s.withTimeout(s.ctx, 3*r.boot+5*time.Minute+r.watchdogAllowance())
 	defer cancel()
 	switch {
 	case gone != "":
@@ -508,6 +514,15 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 		r.armedBoot = ""
 		return accessCut("before the Lab boot (" + err.Error() + ")")
 	} else if err != nil {
+		// No reboot is coming for restore to wait for: lab-agent says the arm
+		// failed, and cancels the one-shot when it does; or labd gave up on it
+		// (a timeout, a lost Mac), and answers its result, if it comes, as
+		// forgotten, which has lab-agent cancel the one-shot instead of
+		// rebooting. A cancel can race the result labd took, so after one,
+		// restore still waits.
+		if ctx.Err() == nil {
+			r.armedBoot = ""
+		}
 		return api.OutcomeInfra, "arming the one-shot boot failed: " + err.Error()
 	}
 	if arm.RebootWarningSec > 0 {
@@ -517,16 +532,29 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 	}
 	r.ev("one-shot armed, rebooting into %s", sr.Entry)
 	v.rearmSerial(3 * time.Minute)
-	steps, ok, err := v.waitBack(ctx, oldBoot, t0, r.boot, r.selfRecovery())
+	steps, ok, neverLeft, err := v.waitBack(ctx, oldBoot, t0, r.boot, r.selfRecovery())
 	r.addRecovery(steps)
 	if err != nil {
 		return api.OutcomeCanceled, "canceled while booting"
 	}
+	// The arm was acked, but the Mac stayed up on the boot it armed:
+	// lab-agent's re-arm before the reboot, or the reboot itself, failed.
+	// The test kernel never ran, so that is the lab's failure, not its;
+	// unless the ladder's reboot ran it after all (a one-shot left armed)
+	// and a kernel failed since.
+	const neverRebooted = "the Mac never rebooted into the test kernel after its one-shot was armed: lab-agent's re-arm before the reboot, or the reboot itself, failed"
+	never := neverLeft && !r.kernelFailedSince(t0)
 	if !ok {
+		if never {
+			return api.OutcomeInfra, neverRebooted
+		}
 		o, cause := r.classify(t0, steps)
 		return o, cause
 	}
 	d = v.snapshot()
+	if d.Health.JobTag != j.ID && never {
+		return api.OutcomeInfra, neverRebooted
+	}
 	if d.Health.JobTag != j.ID {
 		o, cause := r.classify(t0, steps)
 		r.s.updateJob(j, func(j *api.Job) { j.Result.FellBack = true })
@@ -587,7 +615,10 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 		}
 		r.ev("test %s: running", t.Name)
 		var tr api.TestResult
-		err := v.callNote(ctx, api.CmdRunTest, j.ID, t, r.testTimeout(t), &tr, func(n string) { r.ev("%s", n) })
+		// On the Lab boot labd judged, which may have gone down since: a test
+		// that runs on the boot after it would pass the known-good kernel.
+		r.testStarted, r.testLimit = r.s.now(), r.testTimeout(t)
+		err := v.callNoteOn(ctx, r.bootID, api.CmdRunTest, j.ID, t, r.testTimeout(t), &tr, func(n string) { r.ev("%s", n) })
 		if errors.Is(err, errDeviceLost) {
 			return r.lostDuringTest(ctx, t.Name)
 		}
@@ -652,7 +683,13 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 
 	r.capture("after-tests")
 	r.state(api.JobCollecting)
-	files, collectErr := r.collectE(ctx, "0")
+	// From the Lab boot labd judged: the boot after it would read as the test
+	// kernel's logs and health, and pass it. Losing it here, to a new boot or
+	// to silence, is losing it as during a test.
+	files, collectErr := r.collectIntoOn(ctx, r.bootID, "0", "")
+	if errors.Is(collectErr, errDeviceLost) || v.snapshot().BootID != r.bootID {
+		return r.lostDuringTest(ctx, "")
+	}
 	if b, err := os.ReadFile(filepath.Join(r.s.jobDir(j.ID), "boot0", "systemd-analyze.txt")); err == nil {
 		if first, _, _ := strings.Cut(strings.TrimSpace(string(b)), "\n"); first != "" {
 			r.ev("systemd-analyze: %s", first)
@@ -861,11 +898,13 @@ func (r *jobRun) expectedLength() time.Duration {
 	return d
 }
 
-// noContactWait is how long past its boot timeout a Lab boot gets to come back
-// by itself: lab-agent's early unit reboots one that never reaches labd at its
-// no-contact deadline (twice the boot timeout, at most 9 minutes), and the Mac then needs a boot
-// to check in.
-func (r *jobRun) noContactWait() time.Duration { return 2 * r.boot }
+// noContactWait is how long past its boot timeout labd gives a Lab boot that
+// never reached it: until lab-agent's no-contact deadline, on a clock that
+// may run that margin behind, has rebooted it; at least twice the boot
+// timeout. The boot timeout itself is left for the known-good boot after.
+func (r *jobRun) noContactWait() time.Duration {
+	return max(2*r.boot, agent.NoContactDeadline(r.boot)+r.s.cfg.LabClockSkew)
+}
 
 // selfRecovery is how long past its boot timeout labd waits for a Lab boot to
 // come back by itself before the recovery ladder. A Lab-owned Mac's OOB hard
@@ -992,6 +1031,59 @@ func (r *jobRun) addRecovery(steps []string) {
 	}
 }
 
+// lostSelfRecovery is how much longer than timeout labd lets a Lab boot it
+// lost come back by itself before the recovery ladder. With a hard reset,
+// none: that is the next rung. Without one the next rung is a person, so labd
+// waits until lab-agent's watchdog has reset the boot (idleReset after the
+// last sign of labd) and a boot timeout more for the known-good boot: a
+// person is asked only for a Mac that can't come back by itself (CONTEXT.md,
+// Needs hands).
+//
+// A Mac labd still hears gets none either: its watchdog is fed, and the
+// ladder's soft reboot is what it needs. A test still running feeds the
+// watchdog until its budget, not the idle one, is spent (testEnd: labd's
+// own timeout for it, which is longer).
+func lostSelfRecovery(hasOOB, alive bool, lastSeen, testEnd, now time.Time, boot, timeout, idleReset time.Duration) time.Duration {
+	if hasOOB || alive {
+		return 0
+	}
+	reset := lastSeen.Add(idleReset)
+	if testEnd.After(reset) {
+		reset = testEnd
+	}
+	return max(0, reset.Sub(now)+boot-timeout)
+}
+
+// watchdogRecovery is lostSelfRecovery for this job's Mac now, after timeout.
+func (r *jobRun) watchdogRecovery(timeout time.Duration) time.Duration {
+	r.v.mu.Lock()
+	hasOOB, alive, lastSeen := r.v.effectiveOOBLocked() != nil, r.v.aliveLocked(), r.v.d.LastSeen
+	r.v.mu.Unlock()
+	return lostSelfRecovery(hasOOB, alive, lastSeen, r.testStarted.Add(r.testLimit), r.s.now(), r.boot, timeout, r.s.cfg.WatchdogIdleReset)
+}
+
+// watchdogAllowance is the longest watchdogRecovery can add to a wait on this
+// job's Mac: none with a hard reset.
+func (r *jobRun) watchdogAllowance() time.Duration {
+	r.v.mu.Lock()
+	hasOOB := r.v.effectiveOOBLocked() != nil
+	r.v.mu.Unlock()
+	if hasOOB {
+		return 0
+	}
+	return r.s.cfg.WatchdogIdleReset + r.boot
+}
+
+// kernelFailedSince is whether labd saw a fatal kernel event since t0.
+func (r *jobRun) kernelFailedSince(t0 time.Time) bool {
+	for _, e := range r.v.eventsSince(t0) {
+		if detect.Fatal(e.Kind) {
+			return true
+		}
+	}
+	return false
+}
+
 // classify names what went wrong from the kernel events seen since t0.
 func (r *jobRun) classify(t0 time.Time, steps []string) (string, string) {
 	events := r.v.eventsSince(t0)
@@ -1034,11 +1126,27 @@ func (r *jobRun) classify(t0 time.Time, steps []string) (string, string) {
 var quickReboot = 90 * time.Second
 
 func (r *jobRun) lostDuringTest(ctx context.Context, test string) (string, string) {
-	r.ev("lost the Mac during test %s; waiting for it to come back", test)
+	during := "during test " + test
+	if test == "" {
+		during = "after its tests"
+	}
+	r.ev("lost the Mac %s; waiting for it to come back", during)
 	lost := r.s.now()
 	// A hang has already had quietGrace of silence to show itself.
-	steps, ok, err := r.v.waitBack(ctx, r.bootID, r.bootedAt, max(r.boot-r.s.quietGrace(), time.Minute), 0)
+	timeout := max(r.boot-r.s.quietGrace(), time.Minute)
+	steps, ok, neverLeft, err := r.v.waitBack(ctx, r.bootID, r.bootedAt, timeout, r.watchdogRecovery(timeout))
 	r.addRecovery(steps)
+	kernelFailed := r.kernelFailedSince(r.bootedAt.Add(-time.Second))
+	if err != nil && !kernelFailed {
+		// Canceled before the Mac came back, with nothing to say its kernel
+		// failed: a Lab boot that lost its network looks just the same.
+		return api.OutcomeCanceled, "canceled while waiting for the Mac, lost " + during
+	}
+	if ok && neverLeft && !kernelFailed {
+		// Still up on the same boot, and checking in again: it lost its
+		// network for a while, and its kernel never went down.
+		return api.OutcomeLostContact, "labd lost the Mac " + during + ", but it came back on the same boot: its network went, not its kernel"
+	}
 	o, cause := r.classify(r.bootedAt.Add(-time.Second), steps)
 	if o == api.OutcomeBootFailed {
 		// Nothing says panic: only how long it took to come back hints at what happened.
@@ -1052,25 +1160,32 @@ func (r *jobRun) lostDuringTest(ctx context.Context, test string) (string, strin
 			}
 		}
 	}
-	r.s.updateJob(r.j, func(j *api.Job) {
-		j.Result.Tests = append(j.Result.Tests, api.TestResult{Name: test, ExitCode: -1, Error: "the kernel went down during this test"})
-	})
+	if test != "" {
+		r.s.updateJob(r.j, func(j *api.Job) {
+			j.Result.Tests = append(j.Result.Tests, api.TestResult{Name: test, ExitCode: -1, Error: "the kernel went down during this test"})
+		})
+	}
 	if err == nil && ok {
 		r.ev("back after %.0fs", r.s.since(lost).Seconds())
 		switch lostBoot := r.collectLost(ctx); lostBoot.Deadline {
 		case "":
 		case api.DeadlineWindowClosed:
-			return windowCut("during test " + test + ": lab-agent rebooted the Mac to " + r.v.snapshot().Kernel)
+			return windowCut(during + ": lab-agent rebooted the Mac to " + r.v.snapshot().Kernel)
 		case api.DeadlineAccessLowered:
-			return accessCut("during test " + test + ": lab-agent rebooted the Mac to " + r.v.snapshot().Kernel)
+			return accessCut(during + ": lab-agent rebooted the Mac to " + r.v.snapshot().Kernel)
+		case api.DeadlineLostLabd:
+			// A kernel error seen before the network went is still the kernel's.
+			if !kernelFailed {
+				o, cause = api.OutcomeLostContact, "labd lost the Lab boot, and lab-agent's watchdog rebooted it for that"
+			}
 		default:
 			o, cause = api.OutcomeLostContact, fmt.Sprintf("labd lost the Lab boot and its %s deadline rebooted it", lostBoot.Deadline)
 		}
 	}
 	if o == api.OutcomeCrashedOrHung {
-		return o, fmt.Sprintf("crashed or hung during test %s: %s", test, cause)
+		return o, fmt.Sprintf("crashed or hung %s: %s", during, cause)
 	}
-	return o, fmt.Sprintf("during test %s: %s", test, cause)
+	return o, fmt.Sprintf("%s: %s", during, cause)
 }
 
 func (r *jobRun) crashTest(ctx context.Context) (string, string) {
@@ -1080,7 +1195,7 @@ func (r *jobRun) crashTest(ctx context.Context) (string, string) {
 	r.ev("triggering a deliberate kernel %s", r.j.Spec.Crash)
 	r.v.send(api.CmdCrash, r.j.ID, api.CrashArgs{Mode: r.j.Spec.Crash})
 	r.v.rearmSerial(3 * time.Minute)
-	steps, ok, err := r.v.waitBack(ctx, old, t0, r.boot, 0)
+	steps, ok, _, err := r.v.waitBack(ctx, old, t0, r.boot, 0)
 	r.addRecovery(steps)
 	if err != nil {
 		return api.OutcomeCanceled, "canceled during crash test"
@@ -1117,18 +1232,20 @@ func (r *jobRun) collectLost(ctx context.Context) api.LostBoot {
 	return lost
 }
 
-func (r *jobRun) collectE(ctx context.Context, boot string) ([]string, error) {
-	return r.collectInto(ctx, boot, "")
-}
-
 // collectTimeout is how long labd gives a Mac to collect a boot's logs.
 const collectTimeout = 5 * time.Minute
 
 // collectInto collects a boot's logs into the job's dir: "" is lab-agent's
 // own choice (boot0, or prevboot for "-1").
 func (r *jobRun) collectInto(ctx context.Context, boot, dir string) ([]string, error) {
+	return r.collectIntoOn(ctx, "", boot, dir)
+}
+
+// collectIntoOn is collectInto from the Mac's boot on ("" is the one it is on
+// now); if it has left that boot, the logs are not collected.
+func (r *jobRun) collectIntoOn(ctx context.Context, on, boot, dir string) ([]string, error) {
 	var files []string
-	if err := r.v.call(ctx, api.CmdCollect, r.j.ID, api.CollectArgs{Boot: boot, Dir: dir}, collectTimeout, &files); err != nil {
+	if err := r.v.callNoteOn(ctx, on, api.CmdCollect, r.j.ID, api.CollectArgs{Boot: boot, Dir: dir}, collectTimeout, &files, nil); err != nil {
 		r.ev("collect logs (boot %s): %v", boot, err)
 		return nil, err
 	}
@@ -1181,7 +1298,7 @@ func (r *jobRun) restore(ctx context.Context) error {
 		v.mu.Unlock()
 		if pending {
 			r.ev("waiting for %s to finish rebooting before restoring", r.j.Spec.Device)
-			steps, _, err := v.waitBack(ctx, r.armedBoot, r.armedAt, r.boot, r.selfRecovery())
+			steps, _, _, err := v.waitBack(ctx, r.armedBoot, r.armedAt, r.boot, r.selfRecovery())
 			r.addRecovery(steps)
 			if err != nil {
 				return err
@@ -1194,7 +1311,9 @@ func (r *jobRun) restore(ctx context.Context) error {
 		t0 := r.s.now()
 		v.send(api.CmdReboot, r.j.ID, nil)
 		v.rearmSerial(3 * time.Minute)
-		steps, ok, err := v.waitBack(ctx, d.BootID, t0, r.boot, 0)
+		// A Lab boot that can't hear the reboot (no network) is reset by
+		// lab-agent's watchdog: give it that before asking for hands.
+		steps, ok, _, err := v.waitBack(ctx, d.BootID, t0, r.boot, r.watchdogRecovery(r.boot))
 		r.addRecovery(steps)
 		if err != nil {
 			return err
